@@ -18,10 +18,10 @@ function formValue(form: Form, key: string): string {
   return typeof v === "string" ? v : "";
 }
 
-/** 只接受站内相对路径，防开放跳转（登录/注册后的 ?next） */
+/** 只接受站内相对路径，防开放跳转与头部注入（登录/注册后的 ?next） */
 function safeNext(v: unknown): string {
   if (typeof v !== "string") return "/";
-  if (!v.startsWith("/") || v.startsWith("//") || v.includes("\\")) return "/";
+  if (!v.startsWith("/") || v.startsWith("//") || v.includes("\\") || /[\r\n\t]/.test(v)) return "/";
   return v.slice(0, 512);
 }
 
@@ -184,8 +184,9 @@ app.post("/register", async (c) => {
   } catch {
     return renderError("这个昵称已被占用", 409);
   }
-  await createSession(c, userId);
+  // 审计先于会话签发：与登录一致，审计失败时不发会话（fail-closed），不会出现「已注册已登录但无审计」
   await audit(c, "register.ok", { accountId: userId, detail: { name, locked: locked === 1, invited: code !== "" } });
+  await createSession(c, userId);
   return c.redirect("/", 303);
 });
 

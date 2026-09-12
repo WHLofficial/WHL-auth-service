@@ -19,6 +19,8 @@ app.use(async (c, next) => {
   c.header("X-Frame-Options", "DENY");
   c.header("Referrer-Policy", "no-referrer");
   c.header("Cache-Control", "no-store");
+  // 全站经 CF 边缘走 HTTPS；HSTS 由 Worker 兜底（HTTP 响应按规范忽略此头）
+  c.header("Strict-Transport-Security", "max-age=31536000");
   c.header(
     "Content-Security-Policy",
     "default-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
