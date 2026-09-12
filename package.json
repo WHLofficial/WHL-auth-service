@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev --port 8791",
+    "dev": "wrangler dev --port 8792",
     "typecheck": "tsc --noEmit",
     "deploy": "wrangler deploy",
     "db:migrate:local": "wrangler d1 migrations apply whl-auth --local",
