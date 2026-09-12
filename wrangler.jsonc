@@ -1,0 +1,42 @@
+{
+  // 部署前需先创建真实资源并替换占位 ID（TECH_DESIGN §9.4 部署清单）：
+  //   npx wrangler d1 create whl-auth        -> DB.database_id
+  //   npx wrangler kv namespace create RL_KV -> RL_KV.id
+  //   npx wrangler secret put COOKIE_DOMAIN  -> ".whleague.win"
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "whl-auth",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-01",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "whl-auth",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    },
+    // 过渡期（步骤①②）绑定赛事平台账号库，读写 user/signup_code；步骤③收口后移除此绑定（TECH_DESIGN §5.3）
+    {
+      "binding": "TOUR_DB",
+      "database_name": "whl",
+      "database_id": "ec3cc695-70bc-47ab-a454-5ca62ec22dd6"
+    }
+  ],
+  "kv_namespaces": [
+    // 共享会话 KV：与 tour/guess 同一 namespace，写 sess:* 兼容键（兼容桥，步骤③收口后移除）
+    {
+      "binding": "SESSION_KV",
+      "id": "87e2d78308bc47e9b36dc6de53be0458"
+    },
+    // auth 自有 KV：rl:* 限流等，与共享会话 KV 物理隔离（TECH_DESIGN §8.4）
+    {
+      "binding": "RL_KV",
+      "id": "00000000000000000000000000000000"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  },
+  // 与 tour 一致：让计算靠近 D1（亚太）数据中心
+  "placement": {
+    "mode": "smart"
+  }
+}
