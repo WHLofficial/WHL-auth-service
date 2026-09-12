@@ -4,13 +4,7 @@
 // 轮换 = 换一把新密钥（kid 取公钥 JWK 指纹，自动变化）；旧 access/ID token 最长 30/10 分钟后自然失效。
 import { generateKeyPairSync } from "node:crypto";
 
-const { privateKey } = generateKeyPairSync("rsa", {
-  modulusLength: 2048,
-  publicKeyEncoding: { type: "spki", format: "pem" },
-  privateKeyEncoding: { type: "pkcs8", format: "pem" },
-});
-
-const der = privateKey.export({ type: "pkcs8", format: "der" });
-const b64 = der.toString("base64");
+const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const b64 = privateKey.export({ type: "pkcs8", format: "der" }).toString("base64");
 
 console.log(`AUTH_JWT_PRIVATE_KEY=${b64}`);
