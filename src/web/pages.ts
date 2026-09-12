@@ -98,3 +98,8 @@ export function errorPage(status: 404 | 500): string {
     `<p class="sub">${text}</p><p class="foot"><a href="/">返回首页</a></p>`,
   );
 }
+
+/** OIDC 端点上给浏览器看的错误页（只用于 client/redirect 本身不可信、不能跳转的场景） */
+export function oidcErrorPage(title: string, detail: string): string {
+  return page(title, `<p class="sub">${esc(detail)}</p><p class="foot"><a href="/login">去登录</a></p>`);
+}

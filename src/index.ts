@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { AppEnv } from "./env";
 import { getSessionUser } from "./lib/session";
 import routes from "./routes/pages";
+import oidcRoutes from "./routes/oidc";
 import { errorPage } from "./web/pages";
 
 const app = new Hono<AppEnv>();
@@ -30,6 +31,7 @@ app.use(async (c, next) => {
 app.get("/healthz", (c) => c.json({ ok: true }));
 
 app.route("/", routes);
+app.route("/", oidcRoutes);
 
 app.notFound((c) => c.html(errorPage(404), 404));
 

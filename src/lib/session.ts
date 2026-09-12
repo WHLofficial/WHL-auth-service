@@ -4,7 +4,7 @@ import type { AppEnv, SessionUser } from "../env";
 import { randomToken, sha256Hex } from "./crypto";
 import { nowIso } from "./util";
 
-const COOKIE = "whl_session";
+export const SESSION_COOKIE = "whl_session";
 const TTL_SECONDS = 7 * 24 * 3600;
 
 /** 配置 COOKIE_DOMAIN 时用主域根，同主域子系统共享登录态；否则 host-only */
@@ -34,7 +34,7 @@ export async function createSession(c: Context<AppEnv>, userId: number): Promise
       new Date(Date.now() + TTL_SECONDS * 1000).toISOString(),
     )
     .run();
-  setCookie(c, COOKIE, token, {
+  setCookie(c, SESSION_COOKIE, token, {
     httpOnly: true,
     sameSite: "Lax",
     path: "/",
@@ -43,11 +43,11 @@ export async function createSession(c: Context<AppEnv>, userId: number): Promise
     ...cookieDomain(c),
   });
   // 切换共享域后清掉历史 host-only 同名 cookie，避免新旧两个 whl_session 并存、读取歧义
-  if (c.env.COOKIE_DOMAIN) deleteCookie(c, COOKIE, { path: "/" });
+  if (c.env.COOKIE_DOMAIN) deleteCookie(c, SESSION_COOKIE, { path: "/" });
 }
 
 export async function getSessionUser(c: Context<AppEnv>): Promise<SessionUser | null> {
-  const token = getCookie(c, COOKIE);
+  const token = getCookie(c, SESSION_COOKIE);
   if (!token) return null;
   const raw = await c.env.SESSION_KV.get(`sess:${token}`);
   if (!raw) return null;
@@ -83,7 +83,7 @@ export async function getSessionUser(c: Context<AppEnv>): Promise<SessionUser | 
 }
 
 export async function destroySession(c: Context<AppEnv>): Promise<void> {
-  const token = getCookie(c, COOKIE);
+  const token = getCookie(c, SESSION_COOKIE);
   if (token) {
     await c.env.SESSION_KV.delete(`sess:${token}`);
     await c.env.DB.prepare("UPDATE session SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL")
@@ -91,7 +91,7 @@ export async function destroySession(c: Context<AppEnv>): Promise<void> {
       .run();
   }
   // 删除需 Name+Domain+Path 全匹配：共享域下漏掉 domain 会删不掉，登出后仍带登录态
-  deleteCookie(c, COOKIE, { path: "/", ...cookieDomain(c) });
+  deleteCookie(c, SESSION_COOKIE, { path: "/", ...cookieDomain(c) });
   // 兜底清掉切换共享域前遗留的 host-only 同名 cookie
-  if (c.env.COOKIE_DOMAIN) deleteCookie(c, COOKIE, { path: "/" });
+  if (c.env.COOKIE_DOMAIN) deleteCookie(c, SESSION_COOKIE, { path: "/" });
 }
