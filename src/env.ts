@@ -11,6 +11,8 @@ export type Bindings = {
   RL_KV: KVNamespace;
   /** 会话 cookie 的 Domain 属性（".whleague.win"），同主域子系统共享登录态；不配则 host-only。生产用 secret 配置 */
   COOKIE_DOMAIN?: string;
+  /** OIDC RS256 签名私钥（PKCS8，PEM 或单行 base64 均可），kid 取公钥 JWK 指纹自动派生（TECH_DESIGN §9.4） */
+  AUTH_JWT_PRIVATE_KEY?: string;
 };
 
 export type SessionUser = {
