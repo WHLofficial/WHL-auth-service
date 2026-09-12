@@ -2,6 +2,7 @@ import { getCookie, setCookie } from "hono/cookie";
 import type { Context } from "hono";
 import type { AppEnv } from "../env";
 import { randomToken } from "./crypto";
+import { timingSafeEqual } from "./util";
 
 const CSRF_COOKIE = "whl_csrf";
 const CSRF_TTL_SECONDS = 7 * 24 * 3600;
@@ -29,11 +30,4 @@ export function csrfValid(c: Context<AppEnv>, submitted: unknown): boolean {
   const cookieToken = getCookie(c, CSRF_COOKIE);
   if (!cookieToken) return false;
   return timingSafeEqual(cookieToken, submitted);
-}
-
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
 }
