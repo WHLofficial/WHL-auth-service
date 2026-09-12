@@ -1,11 +1,12 @@
 import { Hono } from "hono";
+import { getCookie } from "hono/cookie";
 import type { Context } from "hono";
 import type { AppEnv } from "../env";
 import { audit } from "../lib/audit";
 import { csrfValid, ensureCsrfToken } from "../lib/csrf";
 import { hashPassword, sha256Hex, verifyPassword } from "../lib/crypto";
 import { rateLimit } from "../lib/ratelimit";
-import { createSession, destroySession } from "../lib/session";
+import { SESSION_COOKIE, createSession, destroySession, revokeSessionTokens } from "../lib/session";
 import { clientIp } from "../lib/util";
 import { homePage, loginPage, passwordPage, registerPage } from "../web/pages";
 
@@ -245,6 +246,9 @@ app.post("/password", async (c) => {
   await c.env.TOUR_DB.prepare("UPDATE user SET password_hash = ?, must_change_pw = 0 WHERE id = ?")
     .bind(await hashPassword(newPassword), user.id)
     .run();
+  // 会话轮换：旧会话签发的 OIDC token 一并吊销（改密可能是泄露后的处置动作）
+  const oldToken = getCookie(c, SESSION_COOKIE);
+  if (oldToken) await revokeSessionTokens(c, await sha256Hex(oldToken));
   await destroySession(c);
   await createSession(c, user.id);
   await audit(c, "pw.change", { accountId: user.id });
@@ -257,6 +261,9 @@ app.post("/logout", async (c) => {
   // 登出属低风险操作，CSRF 校验不过回首页重试即可，不渲染错误页
   if (!csrfValid(c, form.csrf)) return c.redirect("/", 303);
   const user = c.get("user");
+  // 与 OIDC GET /logout 同口径：吊销本会话签发的全部 refresh
+  const token = getCookie(c, SESSION_COOKIE);
+  if (token) await revokeSessionTokens(c, await sha256Hex(token));
   await destroySession(c);
   if (user) await audit(c, "logout", { accountId: user.id });
   return c.redirect("/login", 303);

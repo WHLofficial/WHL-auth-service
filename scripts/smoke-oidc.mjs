@@ -239,6 +239,43 @@ console.log("== end_session 登出联动 ==");
   ok("登出后再 authorize 要重新登录", reAuth.res.status === 303 && location(reAuth.res).startsWith("/login"));
 }
 
+console.log("== compat 登出/改密联动吊销（与 GET /logout 同口径） ==");
+{
+  jar.clear();
+  await login("oidctest", "TestPass123");
+  const g = await authorize();
+  const codeG = g.params.code;
+  const home = await req("GET", "/");
+  const csrf = /name="csrf" value="([^"]+)"/.exec(await home.text())?.[1];
+  const lo = await req("POST", "/logout", { body: new URLSearchParams({ csrf }).toString() });
+  ok("compat POST /logout 303", lo.status === 303);
+  ok("compat 登出后未换的 code 作废", (await exchange(codeG, g.verifier)).res.status === 400);
+  // refresh 吊销验证需要真实 token，重新走一遍：登录 → 换 token → POST /logout → refresh 应死
+  jar.clear();
+  await login("oidctest", "TestPass123");
+  const g2 = await authorize();
+  const t = (await exchange(g2.params.code, g2.verifier)).json;
+  const home2 = await req("GET", "/");
+  const csrf2 = /name="csrf" value="([^"]+)"/.exec(await home2.text())?.[1];
+  await req("POST", "/logout", { body: new URLSearchParams({ csrf: csrf2 }).toString() });
+  ok("compat 登出吊销该会话 refresh", (await refresh(t.refresh_token)).status === 400);
+
+  // 改密轮换联动吊销
+  jar.clear();
+  await login("oidctest", "TestPass123");
+  const g3 = await authorize();
+  const t3 = (await exchange(g3.params.code, g3.verifier)).json;
+  const pwPage = await req("GET", "/password");
+  const pcsrf = /name="csrf" value="([^"]+)"/.exec(await pwPage.text())?.[1];
+  const pwRes = await req("POST", "/password", {
+    body: new URLSearchParams({ csrf: pcsrf, oldPassword: "TestPass123", newPassword: "NewPass789" }).toString(),
+  });
+  ok("改密成功回首页", pwRes.status === 303 && location(pwRes) === "/?notice=pw_changed");
+  ok("改密后旧 refresh 吊销", (await refresh(t3.refresh_token)).status === 400);
+  const g4 = await authorize();
+  ok("改密后新会话照常发码", g4.res.status === 303 && typeof g4.params.code === "string");
+}
+
 console.log("== must_change 用户：改密不断链 ==");
 {
   jar.clear();

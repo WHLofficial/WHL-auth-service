@@ -21,9 +21,8 @@ type SigningKey = {
 let cached: { src: string; key: SigningKey } | null = null;
 
 function derFromPemOrBase64(src: string): Uint8Array {
-  const b64 = src.includes("-----BEGIN")
-    ? src.replace(/-----(BEGIN|END)[^-]*-----/g, "").replace(/\s+/g, "")
-    : src.trim();
+  // 兼容三种形态：带 armor 的 PEM、单行 base64、带换行的裸 base64（wrangler secret 粘贴常见）
+  const b64 = src.replace(/\s+/g, "").replace(/-----(BEGIN|END)[^-]*-----/g, "");
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
@@ -48,6 +47,8 @@ export async function signingKey(env: Bindings): Promise<SigningKey> {
   const privateJwk = (await crypto.subtle.exportKey("jwk", privateKey)) as JsonWebKey;
   const { kty, n, e } = privateJwk;
   if (kty !== "RSA" || !n || !e) throw new Error("AUTH_JWT_PRIVATE_KEY 不是可用的 RSA PKCS8 密钥");
+  // RSA-2048 起步：base64url 的 n 长度 ×3/4 ≈ 模长字节数，短于 256 字节（2048 位）直接拒绝
+  if (n.length * 0.75 < 256) throw new Error("RSA 密钥强度不足（要求 ≥2048 位）");
   const bare = { kty, n, e } as const;
   const kid = await calculateJwkThumbprint(bare, "sha256");
   const publicKey = await crypto.subtle.importKey(

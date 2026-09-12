@@ -6,7 +6,7 @@ import { audit } from "../lib/audit";
 import { randomToken, sha256Hex } from "../lib/crypto";
 import { signRs256, signingKey, verifyAccessToken, verifyIdTokenHint, verifyPkce } from "../lib/oidc";
 import { rateLimit } from "../lib/ratelimit";
-import { SESSION_COOKIE, destroySession } from "../lib/session";
+import { SESSION_COOKIE, destroySession, revokeSessionTokens } from "../lib/session";
 import { clientIp, nowIso } from "../lib/util";
 import { oidcErrorPage } from "../web/pages";
 
@@ -148,6 +148,8 @@ app.get("/authorize", async (c) => {
   }
 
   const code = randomToken(32);
+  // 机会性清理过期授权码（行本体不自动消失，控制表体积；≤50 用户量级下成本可忽略）
+  await c.env.DB.prepare("DELETE FROM oidc_code WHERE expires_at < ?").bind(new Date().toISOString()).run();
   await c.env.DB.prepare(
     `INSERT INTO oidc_code
        (code_hash, account_id, client_id, redirect_uri, scope, nonce, code_challenge,
@@ -367,6 +369,12 @@ app.post("/token", async (c) => {
     if (!(await verifyPkce(row.code_challenge, verifier))) {
       return oauthJsonError(c, "invalid_grant", "PKCE 校验失败");
     }
+    // 会话吊销联动：发码用的登录会话若已登出，code 随之作废。
+    // auth 登录页建的会话有 D1 行可查；tour 旧登录的会话无行，按存活处理（与 getSessionUser 口径一致）
+    const sess = await c.env.DB.prepare("SELECT revoked_at FROM session WHERE token_hash = ?")
+      .bind(row.session_hash)
+      .first<{ revoked_at: string | null }>();
+    if (sess?.revoked_at) return oauthJsonError(c, "invalid_grant", "登录会话已结束，请重新登录");
     const user = await loadTourUser(c, row.account_id);
     if (!user) return oauthJsonError(c, "invalid_grant", "账号不存在");
     const body = await issueTokens(c, {
@@ -410,6 +418,7 @@ app.post("/token", async (c) => {
     }
     const user = await loadTourUser(c, row.account_id);
     if (!user) return oauthJsonError(c, "invalid_grant", "账号不存在");
+    // 刷新请求的 scope 参数按原 scope 处理（不支持缩窄，避免接入方误传把权限越刷越小）；
     // 刷新签发的 ID token 不带 nonce（OIDC Core §12.2）；沿用原 scope 与轮换族
     const body = await issueTokens(c, {
       accountId: row.account_id,
@@ -499,9 +508,7 @@ app.get("/logout", async (c) => {
   const user = c.get("user");
   if (sessionToken) {
     // §3 登出语义：吊销 auth 会话 + 该会话签发的全部 token
-    await c.env.DB.prepare("UPDATE oidc_refresh SET revoked_at = ? WHERE session_hash = ? AND revoked_at IS NULL")
-      .bind(nowIso(), await sha256Hex(sessionToken))
-      .run();
+    await revokeSessionTokens(c, await sha256Hex(sessionToken));
     await destroySession(c);
     if (user) await audit(c, "logout", { accountId: user.id, detail: { via: "end_session" } });
   }

@@ -95,3 +95,11 @@ export async function destroySession(c: Context<AppEnv>): Promise<void> {
   // 兜底清掉切换共享域前遗留的 host-only 同名 cookie
   if (c.env.COOKIE_DOMAIN) deleteCookie(c, SESSION_COOKIE, { path: "/" });
 }
+
+/** 登出/改密联动：吊销该兼容会话签发的全部 OIDC refresh（TECH_DESIGN §3 登出语义）。
+ *  所有销毁会话的入口（POST /logout、GET /logout、改密轮换）都必须调用 */
+export async function revokeSessionTokens(c: Context<AppEnv>, sessionHash: string): Promise<void> {
+  await c.env.DB.prepare("UPDATE oidc_refresh SET revoked_at = ? WHERE session_hash = ? AND revoked_at IS NULL")
+    .bind(nowIso(), sessionHash)
+    .run();
+}
