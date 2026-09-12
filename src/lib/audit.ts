@@ -9,7 +9,9 @@ export type AuditEvent =
   | "register.ok"
   | "register.rate_limited"
   | "pw.change"
-  | "logout";
+  | "logout"
+  | "oidc.code_replay"
+  | "oidc.refresh_reuse";
 
 /** 关键事件入 audit_log（auth D1）。过渡期 account_id = tour user.id 同值 */
 export async function audit(

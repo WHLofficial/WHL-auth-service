@@ -52,12 +52,14 @@ ${opts.error ? `<p class="msg">${esc(opts.error)}</p>` : ""}
   );
 }
 
-export function passwordPage(opts: { csrf: string; error?: string }): string {
+export function passwordPage(opts: { csrf: string; next?: string; error?: string }): string {
   return page(
     "修改密码",
     `<p class="sub">改完当前登录不受影响。</p>
+${opts.error ? `<p class="msg">${esc(opts.error)}</p>` : ""}
 <form method="post" action="/password">
 <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
+${opts.next ? `<input type="hidden" name="next" value="${esc(opts.next)}">` : ""}
 <label for="oldPassword">当前密码</label>
 <input id="oldPassword" name="oldPassword" type="password" autocomplete="current-password" required>
 <label for="newPassword">新密码</label>

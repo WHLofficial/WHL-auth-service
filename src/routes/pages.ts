@@ -18,11 +18,12 @@ function formValue(form: Form, key: string): string {
   return typeof v === "string" ? v : "";
 }
 
-/** 只接受站内相对路径，防开放跳转与头部注入（登录/注册后的 ?next） */
+/** 只接受站内相对路径，防开放跳转与头部注入（登录/注册/改密后的 ?next）。
+ *  上限放宽到 1024：OIDC 回跳的 /authorize URL 带 state/challenge，512 不够 */
 function safeNext(v: unknown): string {
   if (typeof v !== "string") return "/";
   if (!v.startsWith("/") || v.startsWith("//") || v.includes("\\") || /[\r\n\t]/.test(v)) return "/";
-  return v.slice(0, 512);
+  return v.slice(0, 1024);
 }
 
 async function openRegAllowed(c: Context<AppEnv>): Promise<boolean> {
@@ -84,7 +85,11 @@ app.post("/login", async (c) => {
   }
   await audit(c, "login.ok", { accountId: row.id });
   await createSession(c, row.id);
-  if (row.must_change_pw === 1) return c.redirect("/password", 303);
+  if (row.must_change_pw === 1) {
+    // 带 next 进来的（如 OIDC authorize 跳转）把链路保住：改完密码直接回原目标
+    const nx = safeNext(form.next);
+    return c.redirect(nx === "/" ? "/password" : `/password?next=${encodeURIComponent(nx)}`, 303);
+  }
   return c.redirect(safeNext(form.next), 303);
 });
 
@@ -194,7 +199,8 @@ app.get("/password", async (c) => {
   const user = c.get("user");
   if (!user) return c.redirect("/login", 303);
   const csrf = await ensureCsrfToken(c);
-  return c.html(passwordPage({ csrf }));
+  const next = safeNext(c.req.query("next"));
+  return c.html(passwordPage({ csrf, next: next === "/" ? undefined : next }));
 });
 
 // 语义与 tour POST /api/auth/password 一致：验旧密码、改 tour 库、清 must_change_pw；
@@ -202,24 +208,39 @@ app.get("/password", async (c) => {
 app.post("/password", async (c) => {
   const user = c.get("user");
   if (!user) return c.redirect("/login", 303);
-  if (!(await rateLimit(c.env, `pwd:${user.id}`, 5, 900))) {
-    return c.html(passwordPage({ csrf: await ensureCsrfToken(c), error: "尝试太频繁，请 15 分钟后再来" }), 429);
-  }
+  // 先解析表单：next 走隐藏字段回传，所有错误重渲染都带上它，二次提交后仍能回 OIDC 目标
   const form = (await c.req.parseBody().catch(() => ({}))) as Form;
+  const next = () => safeNext(form.next);
+  if (!(await rateLimit(c.env, `pwd:${user.id}`, 5, 900))) {
+    return c.html(
+      passwordPage({ csrf: await ensureCsrfToken(c), next: next(), error: "尝试太频繁，请 15 分钟后再来" }),
+      429,
+    );
+  }
   if (!csrfValid(c, form.csrf)) {
-    return c.html(passwordPage({ csrf: await ensureCsrfToken(c), error: CSRF_EXPIRED }), 403);
+    return c.html(
+      passwordPage({ csrf: await ensureCsrfToken(c), next: next(), error: CSRF_EXPIRED }),
+      403,
+    );
   }
   const newPassword = formValue(form, "newPassword");
   if (newPassword.length < 8 || !/[A-Za-z]/.test(newPassword) || !/\d/.test(newPassword))
     return c.html(
-      passwordPage({ csrf: await ensureCsrfToken(c), error: "新密码至少 8 位，且要同时包含字母和数字" }),
+      passwordPage({
+        csrf: await ensureCsrfToken(c),
+        next: next(),
+        error: "新密码至少 8 位，且要同时包含字母和数字",
+      }),
       400,
     );
   const row = await c.env.TOUR_DB.prepare("SELECT password_hash FROM user WHERE id = ?")
     .bind(user.id)
     .first<{ password_hash: string }>();
   if (!row || !(await verifyPassword(formValue(form, "oldPassword"), row.password_hash))) {
-    return c.html(passwordPage({ csrf: await ensureCsrfToken(c), error: "旧密码不对" }), 400);
+    return c.html(
+      passwordPage({ csrf: await ensureCsrfToken(c), next: next(), error: "旧密码不对" }),
+      400,
+    );
   }
   await c.env.TOUR_DB.prepare("UPDATE user SET password_hash = ?, must_change_pw = 0 WHERE id = ?")
     .bind(await hashPassword(newPassword), user.id)
@@ -227,7 +248,8 @@ app.post("/password", async (c) => {
   await destroySession(c);
   await createSession(c, user.id);
   await audit(c, "pw.change", { accountId: user.id });
-  return c.redirect("/?notice=pw_changed", 303);
+  const nx = safeNext(form.next);
+  return c.redirect(nx === "/" ? "/?notice=pw_changed" : nx, 303);
 });
 
 app.post("/logout", async (c) => {
