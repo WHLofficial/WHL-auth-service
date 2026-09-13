@@ -1,11 +1,9 @@
 export type Role = "coach" | "admin" | "superadmin";
 
 export type Bindings = {
-  /** auth 自有库：session / identity / app / permission / role / audit_log（TECH_DESIGN §5.3） */
+  /** auth 自有库：account/credential/session/identity/app/role/audit_log 等，账号真源（TECH_DESIGN §5.3 终态） */
   DB: D1Database;
-  /** 过渡期绑定赛事平台账号库（user / signup_code 读写），同 guess 现状模式；步骤③收口后移除 */
-  TOUR_DB: D1Database;
-  /** 共享会话 KV（与 tour/guess 同一 namespace）：写 sess:* 兼容键，三系统零改动读取；收口后移除 */
+  /** 共享会话 KV（与 tour/guess 同一 namespace）：写 sess:* 兼容键，三系统零改动读取；收口后随 P0-13 停写移除 */
   SESSION_KV: KVNamespace;
   /** auth 自有 KV：rl:* 限流等，与共享会话 KV 隔离（TECH_DESIGN §8.4） */
   RL_KV: KVNamespace;

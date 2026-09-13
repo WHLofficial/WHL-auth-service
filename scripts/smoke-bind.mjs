@@ -40,6 +40,23 @@ if (!BIND_SECRET) {
   process.exit(1);
 }
 
+// —— 前置：账号收口迁移（P0-11，幂等）：登录与 displayNameOf 都读 auth 库 account，账号得先迁过来 ——
+{
+  const wrangler = fileURLToPath(new URL('../node_modules/wrangler/bin/wrangler.js', import.meta.url));
+  const cli = (args) => execFileSync(process.execPath, [wrangler, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] });
+  const run = (script, args = []) =>
+    execFileSync(process.execPath, [fileURLToPath(new URL(script, import.meta.url)), ...args], { encoding: 'utf8' });
+  try {
+    cli(['d1', 'migrations', 'apply', 'whl-auth', '--local']);
+    cli(['d1', 'execute', 'whl-auth', '--local', '--command', run('./migrate-accounts.mjs')]);
+    execFileSync(process.execPath, [fileURLToPath(new URL('./verify-accounts.mjs', import.meta.url)), '--allow-extra'], { stdio: 'inherit' });
+    console.log('（账号收口迁移 + 校验通过）');
+  } catch {
+    console.error('✗ 账号收口迁移/校验未通过，冒烟无从继续（校验不过不切读）');
+    process.exit(1);
+  }
+}
+
 function sign(method, pathWithQuery, rawBody, ts) {
   return createHmac('sha256', BIND_SECRET).update(`${method}|${pathWithQuery}|${ts}|${rawBody}`).digest('hex');
 }
@@ -71,15 +88,25 @@ class Jar {
 }
 
 async function req(jar, url, { method = 'GET', form } = {}) {
-  const res = await fetch(url, {
-    method,
-    redirect: 'manual',
-    headers: {
-      ...(jar?.header() ? { cookie: jar.header() } : {}),
-      ...(form ? { 'content-type': 'application/x-www-form-urlencoded' } : {}),
-    },
-    body: form ? new URLSearchParams(form) : undefined,
-  });
+  // 前置 wrangler CLI 落盘后 dev 的 miniflare 会短暂重连，首请求偶发 ECONNRESET：重试即可
+  let res;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      res = await fetch(url, {
+        method,
+        redirect: 'manual',
+        headers: {
+          ...(jar?.header() ? { cookie: jar.header() } : {}),
+          ...(form ? { 'content-type': 'application/x-www-form-urlencoded' } : {}),
+        },
+        body: form ? new URLSearchParams(form) : undefined,
+      });
+      break;
+    } catch (e) {
+      if (attempt >= 3 || !/ECONNRESET|ECONNREFUSED|fetch failed/i.test(String(e.cause ?? e))) throw e;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
   if (jar) jar.absorb(res);
   return res;
 }

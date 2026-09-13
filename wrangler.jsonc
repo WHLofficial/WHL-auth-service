@@ -12,13 +12,8 @@
       "binding": "DB",
       "database_name": "whl-auth",
       "database_id": "00000000-0000-0000-0000-000000000000"
-    },
-    // 过渡期（步骤①②）绑定赛事平台账号库，读写 user/signup_code；步骤③收口后移除此绑定（TECH_DESIGN §5.3）
-    {
-      "binding": "TOUR_DB",
-      "database_name": "whl",
-      "database_id": "ec3cc695-70bc-47ab-a454-5ca62ec22dd6"
     }
+    // 步骤③账号收口（P0-11）后 auth 不再绑定 tour 账号库；TOUR_DB 过渡绑定已移除（TECH_DESIGN §5.3）
   ],
   "kv_namespaces": [
     // 共享会话 KV：与 tour/guess 同一 namespace，写 sess:* 兼容键（兼容桥，步骤③收口后移除）

@@ -3,10 +3,17 @@
 //   SQL=$(node scripts/seed-grants.mjs) && npx wrangler d1 execute whl-auth --local --command "$SQL"
 // 生产改用 --db <tour 账号库> --remote 读账号、再由人为确认后执行到 auth 库（P0-13 runbook）。
 // 幂等：INSERT OR IGNORE + user_role 复合主键，可重复执行。
-// 跨库注意：guess「发起人」在 guess 库，无法在此读取；收口（步骤③）时按
-// 角色 guess.initiator 补播（见 TECH_DESIGN §6.2 末两行）。
-import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+//
+// 竞猜发起人（收口补播，§6.2 末两行）：initiators 名单在 guess 库，主流程读不到；
+// 带 --guess-db whl-guess 时一并读出（users.tour_id 关联回 tour user.id = auth account.id）
+// 播 guess.initiator 角色，合入同一段 SQL 一次执行。
+//
+// coach 补播的等价性依据（P0-10 判定映射）：
+// - tour admin 现可通过 club 的 requireCoach（admin OR coach）→ 收口后教练端点走
+//   club.coach 的权限点，需补 club.coach 才不掉权；
+// - tour admin 在 tour 侧需保留 coach 端点可达（tour.team.bind）→ 补 tour.coach。
+//   club 本地 admin 同理经 requireCoach 获得 coach 端点，「admin 统一补 coach」一并覆盖。
+import { d1Query, GUESS_STATE } from "./lib/d1.mjs";
 
 const argv = process.argv.slice(2);
 const argOf = (name, dflt) => {
@@ -15,6 +22,7 @@ const argOf = (name, dflt) => {
   return v === undefined || v.startsWith("--") ? dflt : v;
 };
 const db = argOf("--db", "whl");
+const guessDb = argOf("--guess-db");
 const remote = argv.includes("--remote");
 
 // §6.2 映射：tour user.role → 角色键。locked 不进授权（是账号状态，
@@ -23,8 +31,10 @@ const GRANTS = {
   superadmin: [[null, "superadmin"]], // 全局角色，已持有全部权限点
   admin: [
     ["tour", "recorder"],
+    ["tour", "coach"], // 补播：tour admin 保留 coach 端点可达（见文件头等价性依据）
     ["guess", "admin"],
     ["club", "admin"],
+    ["club", "coach"], // 补播：tour admin 现可通过 club requireCoach（见文件头等价性依据）
   ],
   coach: [
     ["tour", "coach"],
@@ -32,15 +42,7 @@ const GRANTS = {
   ],
 };
 
-const wrangler = fileURLToPath(new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url));
-const out = execFileSync(
-  process.execPath,
-  [wrangler, "d1", "execute", db, remote ? "--remote" : "--local", "--json", "--command",
-   "SELECT id, role FROM user WHERE role IN ('superadmin','admin','coach') ORDER BY id"],
-  { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] },
-);
-const parsed = JSON.parse(out);
-const users = Array.isArray(parsed) ? (parsed[0]?.results ?? []) : [];
+const users = d1Query(db, "SELECT id, role FROM user WHERE role IN ('superadmin','admin','coach') ORDER BY id", { remote });
 if (!users.length) throw new Error(`库 ${db} 中未读到可授权账号（role 均为 viewer 或库为空）`);
 
 const rows = new Map(); // "app|role_key" → account_id 列表
@@ -50,6 +52,21 @@ for (const u of users) {
   for (const [app, key] of keys) {
     const k = `${app ?? ""}|${key}`;
     rows.set(k, [...(rows.get(k) ?? []), Number(u.id)]);
+  }
+}
+
+// guess 发起人：按 guess 库 initiators 名单补播 guess.initiator（users.tour_id 为空的孤儿行跳过）；
+// 本地读 guess 仓库自己的状态目录（发起人数据在 guess 的本地库里）
+let initiatorCount = 0;
+if (guessDb) {
+  const initIds = d1Query(
+    guessDb,
+    "SELECT u.tour_id AS tour_id FROM initiators i JOIN users u ON u.id = i.user_id WHERE u.tour_id IS NOT NULL ORDER BY u.tour_id",
+    { remote, persistTo: remote ? undefined : GUESS_STATE },
+  ).map((r) => Number(r.tour_id));
+  if (initIds.length) {
+    rows.set("guess|initiator", [...new Set([...(rows.get("guess|initiator") ?? []), ...initIds])]);
+    initiatorCount = initIds.length;
   }
 }
 
@@ -64,4 +81,6 @@ for (const [k, ids] of rows) {
       `FROM json_each('[${ids.join(",")}]') j`,
   );
 }
+// 摘要走 stderr：stdout 只输出纯 SQL（--command 传参时 `--` 开头行会被 wrangler 当 flag）
+console.error(`seed-grants：${users.length} 个可授权账号${guessDb ? ` + ${initiatorCount} 个竞猜发起人（guess.initiator）` : ""}`);
 console.log(stmts.join(";\n") + ";");

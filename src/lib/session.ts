@@ -1,6 +1,7 @@
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Context } from "hono";
 import type { AppEnv, SessionUser } from "../env";
+import { loadAccountUser } from "./accounts";
 import { randomToken, sha256Hex } from "./crypto";
 import { signLogoutToken } from "./oidc";
 import { nowIso } from "./util";
@@ -50,37 +51,14 @@ export async function createSession(c: Context<AppEnv>, userId: number): Promise
 export async function getSessionUser(c: Context<AppEnv>): Promise<SessionUser | null> {
   const token = getCookie(c, SESSION_COOKIE);
   if (!token) return null;
-  const raw = await c.env.SESSION_KV.get(`sess:${token}`);
-  if (!raw) return null;
-  let userId: number;
-  try {
-    const parsed = JSON.parse(raw) as { userId?: unknown };
-    if (typeof parsed.userId !== "number") return null;
-    userId = parsed.userId;
-  } catch {
-    return null;
-  }
-  // auth 侧主动吊销（全局登出/管理台）即时生效；tour 登录页产生的老会话无 D1 记录，
-  // 依赖 KV 删除传播（最长 ~60s，TECH_DESIGN §8.7 已按假设评估）
-  const sess = await c.env.DB.prepare("SELECT revoked_at FROM session WHERE token_hash = ?")
+  // 账号收口（P0-11，TECH_DESIGN §9.1 ③）：会话只认 auth 库 session 行（auth 登录/注册
+  // 一直双写 D1）。不再读共享 KV——tour 兼容登录页创建的纯 KV 旧会话在这里视为未登录，
+  // 随 7 天 TTL 自然退役；KV 键保留只为旧 client 兼容模式与 R2 回滚，收口后随 P0-13 停写移除。
+  const sess = await c.env.DB.prepare("SELECT account_id, revoked_at FROM session WHERE token_hash = ?")
     .bind(await sha256Hex(token))
-    .first<{ revoked_at: string | null }>();
-  if (sess?.revoked_at) return null;
-  // 过渡期账号真源在 tour 库（TECH_DESIGN §5.3）；收口后改查 auth account
-  const row = await c.env.TOUR_DB.prepare(
-    "SELECT id, name, role, locked, must_change_pw FROM user WHERE id = ?",
-  )
-    .bind(userId)
-    .first<{ id: number; name: string; role: SessionUser["role"]; locked: number; must_change_pw: number }>();
-  return row
-    ? {
-        id: row.id,
-        name: row.name,
-        role: row.role,
-        locked: row.locked === 1,
-        mustChangePassword: row.must_change_pw === 1,
-      }
-    : null;
+    .first<{ account_id: number; revoked_at: string | null }>();
+  if (!sess || sess.revoked_at) return null;
+  return loadAccountUser(c, sess.account_id);
 }
 
 export async function destroySession(c: Context<AppEnv>): Promise<void> {

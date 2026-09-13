@@ -1,6 +1,6 @@
 // 与 tour 的 worker/lib/crypto.ts 同款算法：兼容桥要求哈希格式与 token 形状完全一致，
 // 过渡期 auth 验的是 tour 库里已有的 pbkdf2$25000$... 哈希，任何格式偏差都会导致全量登录失败。
-const PBKDF2_ITERATIONS = 25_000; // Workers 免费档 CPU 预算内取值；登录另有 IP/账号双限流兜底（TECH_DESIGN §8.1）
+export const PBKDF2_ITERATIONS = 25_000; // Workers 免费档 CPU 预算内取值；登录另有 IP/账号双限流兜底（TECH_DESIGN §8.1）
 
 function toB64(bytes: Uint8Array): string {
   let s = "";

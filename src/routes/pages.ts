@@ -4,7 +4,7 @@ import type { Context } from "hono";
 import type { AppEnv } from "../env";
 import { audit } from "../lib/audit";
 import { csrfValid, ensureCsrfToken } from "../lib/csrf";
-import { hashPassword, sha256Hex, verifyPassword } from "../lib/crypto";
+import { PBKDF2_ITERATIONS, hashPassword, sha256Hex, verifyPassword } from "../lib/crypto";
 import { rateLimit } from "../lib/ratelimit";
 import { SESSION_COOKIE, createSession, destroySession, revokeSessionAndNotify } from "../lib/session";
 import { clientIp } from "../lib/util";
@@ -40,7 +40,8 @@ function safeNext(v: unknown): string {
 }
 
 async function openRegAllowed(c: Context<AppEnv>): Promise<boolean> {
-  const org = await c.env.TOUR_DB.prepare("SELECT allow_open_reg FROM organization WHERE id = 1")
+  // 账号收口（P0-11）：组织级注册开关随账号真源迁入 auth（初值由迁移脚本从 tour 库复制）
+  const org = await c.env.DB.prepare("SELECT allow_open_reg FROM organization WHERE id = 1")
     .first<{ allow_open_reg: number }>();
   return (org?.allow_open_reg ?? 0) === 1;
 }
@@ -84,12 +85,14 @@ app.post("/login", async (c) => {
     await audit(c, "login.rate_limited", { detail: { scope: "name", name } });
     return c.html(loginPage({ csrf: await ensureCsrfToken(c), error: "这个账号尝试太频繁，请 15 分钟后再来" }), 429);
   }
-  // 过渡期账号真源在 tour 库（TECH_DESIGN §5.3）；收口后改查 auth account/credential
-  const row = await c.env.TOUR_DB.prepare(
-    "SELECT id, name, role, locked, must_change_pw, password_hash FROM user WHERE name = ?",
+  // 账号收口（P0-11）：账号/凭证真源 = auth 库 account/credential（TECH_DESIGN §5.3 终态）
+  const row = await c.env.DB.prepare(
+    `SELECT a.id, a.locked, a.must_change_pw, cr.hash AS password_hash
+       FROM account a JOIN credential cr ON cr.account_id = a.id AND cr.type = 'password'
+      WHERE a.name = ?`,
   )
     .bind(name)
-    .first<{ id: number; role: "coach" | "admin" | "superadmin"; locked: number; must_change_pw: number; password_hash: string }>();
+    .first<{ id: number; locked: number; must_change_pw: number; password_hash: string }>();
   if (!row || !(await verifyPassword(formValue(form, "password"), row.password_hash))) {
     await audit(c, "login.fail", { detail: { name } });
     return c.html(
@@ -153,7 +156,7 @@ app.post("/register", async (c) => {
   const email = formValue(form, "email").trim() || null;
   if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return renderError("邮箱格式不对", 400);
 
-  const count = await c.env.TOUR_DB.prepare("SELECT COUNT(*) AS n FROM user").first<{ n: number }>();
+  const count = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM account").first<{ n: number }>();
   const isFirst = (count?.n ?? 0) === 0;
   const code = formValue(form, "signupCode").trim();
   // 观众号：无注册码注册（需组织开关放开），锁定绑队直到超管解锁
@@ -162,7 +165,7 @@ app.post("/register", async (c) => {
   if (!isFirst) {
     if (code) {
       const codeHash = await sha256Hex(code);
-      const sc = await c.env.TOUR_DB.prepare(
+      const sc = await c.env.DB.prepare(
         "SELECT expires_at, max_uses, used_count FROM signup_code WHERE code_hash = ?",
       )
         .bind(codeHash)
@@ -178,12 +181,12 @@ app.post("/register", async (c) => {
     }
   }
 
-  const dup = await c.env.TOUR_DB.prepare("SELECT id FROM user WHERE name = ?").bind(name).first();
+  const dup = await c.env.DB.prepare("SELECT id FROM account WHERE name = ?").bind(name).first();
   if (dup) return renderError("这个昵称已被占用", 409);
 
   if (!isFirst && code) {
     const codeHash = await sha256Hex(code);
-    const upd = await c.env.TOUR_DB.prepare(
+    const upd = await c.env.DB.prepare(
       "UPDATE signup_code SET used_count = used_count + 1 WHERE code_hash = ? AND (max_uses IS NULL OR used_count < max_uses) AND (expires_at IS NULL OR expires_at > ?)",
     )
       .bind(codeHash, new Date().toISOString())
@@ -191,18 +194,36 @@ app.post("/register", async (c) => {
     if (upd.meta.changes !== 1) return renderError("注册码无效或已用完", 400);
   }
 
-  const role = isFirst ? "superadmin" : "coach";
+  // 账号收口（P0-11）：account + credential + user_role 一个 D1 batch（隐式事务），
+  // 不出现「有账号无凭证/无授权」的半截账号。role 不再是账号列：新账号按 §6.2 投影播种
+  // user_role——首个账号 = 全局 superadmin，其余 = coach（tour.coach + club.coach，等价旧投影）。
+  const now = new Date().toISOString();
+  const pwHash = await hashPassword(password);
+  const stmts = [
+    c.env.DB.prepare("INSERT INTO account (name, email, locked, created_at) VALUES (?, ?, ?, ?)").bind(
+      name,
+      email,
+      locked,
+      now,
+    ),
+    c.env.DB.prepare(
+      "INSERT INTO credential (account_id, type, hash, iterations, updated_at) VALUES ((SELECT id FROM account WHERE name = ?), 'password', ?, ?, ?)",
+    ).bind(name, pwHash, PBKDF2_ITERATIONS, now),
+  ];
+  for (const [appId, key] of isFirst ? [[null, "superadmin"]] : [["tour", "coach"], ["club", "coach"]]) {
+    stmts.push(
+      c.env.DB.prepare(
+        "INSERT INTO user_role (account_id, role_id, granted_at) SELECT (SELECT id FROM account WHERE name = ?), id, ? FROM role WHERE app_id IS ? AND key = ?",
+      ).bind(name, now, appId, key),
+    );
+  }
   let userId: number;
   try {
-    const ins = await c.env.TOUR_DB.prepare(
-      "INSERT INTO user (name, email, password_hash, role, locked) VALUES (?, ?, ?, ?, ?)",
-    )
-      .bind(name, email, await hashPassword(password), role, locked)
-      .run();
-    userId = ins.meta.last_row_id;
+    await c.env.DB.batch(stmts);
   } catch {
     return renderError("这个昵称已被占用", 409);
   }
+  userId = (await c.env.DB.prepare("SELECT id FROM account WHERE name = ?").bind(name).first<{ id: number }>())!.id;
   // 审计先于会话签发：与登录一致，审计失败时不发会话（fail-closed），不会出现「已注册已登录但无审计」
   await audit(c, "register.ok", { accountId: userId, detail: { name, locked: locked === 1, invited: code !== "" } });
   await createSession(c, userId);
@@ -217,7 +238,7 @@ app.get("/password", async (c) => {
   return c.html(passwordPage({ csrf, next: next === "/" ? undefined : next }));
 });
 
-// 语义与 tour POST /api/auth/password 一致：验旧密码、改 tour 库、清 must_change_pw；
+// 语义与 tour POST /api/auth/password 一致：验旧密码、改 auth 库凭证、清 must_change_pw；
 // 差异点：改密后轮换会话（旧 token 全端失效，本浏览器拿到新 cookie，体感仍为已登录）
 app.post("/password", async (c) => {
   const user = c.get("user");
@@ -247,7 +268,9 @@ app.post("/password", async (c) => {
       }),
       400,
     );
-  const row = await c.env.TOUR_DB.prepare("SELECT password_hash FROM user WHERE id = ?")
+  const row = await c.env.DB.prepare(
+    "SELECT cr.hash AS password_hash FROM credential cr WHERE cr.account_id = ? AND cr.type = 'password'",
+  )
     .bind(user.id)
     .first<{ password_hash: string }>();
   if (!row || !(await verifyPassword(formValue(form, "oldPassword"), row.password_hash))) {
@@ -256,9 +279,13 @@ app.post("/password", async (c) => {
       400,
     );
   }
-  await c.env.TOUR_DB.prepare("UPDATE user SET password_hash = ?, must_change_pw = 0 WHERE id = ?")
-    .bind(await hashPassword(newPassword), user.id)
-    .run();
+  // 账号收口（P0-11）：凭证与 must_change_pw 同批写 auth 库（隐式事务）
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      "UPDATE credential SET hash = ?, iterations = ?, updated_at = ? WHERE account_id = ? AND type = 'password'",
+    ).bind(await hashPassword(newPassword), PBKDF2_ITERATIONS, new Date().toISOString(), user.id),
+    c.env.DB.prepare("UPDATE account SET must_change_pw = 0 WHERE id = ?").bind(user.id),
+  ]);
   // 会话轮换：旧会话签发的 OIDC token 一并吊销（改密可能是泄露后的处置动作），client 同步收到登出通知
   const oldToken = getCookie(c, SESSION_COOKIE);
   if (oldToken) await revokeSessionAndNotify(c, await sha256Hex(oldToken));

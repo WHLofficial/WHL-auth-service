@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { getCookie } from "hono/cookie";
 import type { Context } from "hono";
 import type { AppEnv } from "../env";
+import { loadAccountUser, type AccountUser } from "../lib/accounts";
 import { audit } from "../lib/audit";
 import { randomToken, sha256Hex } from "../lib/crypto";
 import { signRs256, signingKey, verifyAccessToken, verifyIdTokenHint, verifyPkce } from "../lib/oidc";
@@ -173,15 +174,6 @@ app.get("/authorize", async (c) => {
 
 // ---------- token 端点（code 换取 + refresh 轮换） ----------
 
-type TourUser = {
-  id: number;
-  name: string;
-  email: string | null;
-  role: "coach" | "admin" | "superadmin";
-  locked: number;
-  must_change_pw: number;
-};
-
 type OidcCodeRow = {
   code_hash: string;
   account_id: number;
@@ -218,13 +210,6 @@ function oauthJsonError(c: Context<AppEnv>, error: string, description: string, 
   });
 }
 
-async function loadTourUser(c: Context<AppEnv>, accountId: number): Promise<TourUser | null> {
-  // 过渡期账号真源在 tour 库；发 token 前现查一次，注销/不存在则拒绝
-  return c.env.TOUR_DB.prepare("SELECT id, name, email, role, locked, must_change_pw FROM user WHERE id = ?")
-    .bind(accountId)
-    .first<TourUser>();
-}
-
 async function issueTokens(
   c: Context<AppEnv>,
   args: {
@@ -235,7 +220,7 @@ async function issueTokens(
     codeHash: string | null;
     familyId: string | null;
     nonce: string | null;
-    user: TourUser;
+    user: AccountUser;
   },
 ): Promise<Record<string, unknown>> {
   const iss = new URL(c.req.url).origin;
@@ -280,30 +265,16 @@ async function issueTokens(
   };
 }
 
-// 过渡期角色换算（§6.2 行为等价）：user_role 由迁移脚本在步骤②③播种，之前按 tour role 现场换算；
-// user_role 有数据后两路并集（查询天然并入），收口后删除这张换算表
-const TRANSITION_ROLES: Record<string, Partial<Record<TourUser["role"], string[]>>> = {
-  tour: { superadmin: ["tour.recorder"], admin: ["tour.recorder"], coach: ["tour.coach"] },
-  guess: { superadmin: ["guess.admin"], admin: ["guess.admin"] },
-  club: { superadmin: ["club.admin"], admin: ["club.admin"], coach: ["club.coach"] },
-};
-
-async function rolesForAud(
-  c: Context<AppEnv>,
-  accountId: number,
-  aud: string,
-  tourRole: TourUser["role"],
-): Promise<string[]> {
+/** 角色 = user_role 授权投影（账号收口后唯一来源，§6.2）；按 aud 过滤防跨系统信息泄漏（§6.3） */
+async function rolesForAud(c: Context<AppEnv>, accountId: number, aud: string): Promise<string[]> {
   const rows = await c.env.DB.prepare(
     "SELECT r.app_id AS app_id, r.key AS role_key FROM user_role ur JOIN role r ON ur.role_id = r.id WHERE ur.account_id = ? AND (r.app_id = ? OR r.app_id IS NULL)",
   )
     .bind(accountId, aud)
     .all<{ app_id: string | null; role_key: string }>();
-  // 角色键带 app 前缀（如 club.admin），全局角色裸键（superadmin）
-  const roles = new Set(rows.results.map((r) => (r.app_id === null ? r.role_key : `${r.app_id}.${r.role_key}`)));
-  if (tourRole === "superadmin") roles.add("superadmin");
-  for (const r of TRANSITION_ROLES[aud]?.[tourRole] ?? []) roles.add(r);
-  return [...roles];
+  // 角色键带 app 前缀（如 club.admin），全局角色裸键（superadmin）；
+  // user_role 主键保证同一角色至多一行，无需去重
+  return rows.results.map((r) => (r.app_id === null ? r.role_key : `${r.app_id}.${r.role_key}`));
 }
 
 async function permissionsFor(c: Context<AppEnv>, aud: string, roles: string[]): Promise<string[]> {
@@ -370,7 +341,7 @@ app.post("/token", async (c) => {
       .bind(row.session_hash)
       .first<{ revoked_at: string | null }>();
     if (sess?.revoked_at) return oauthJsonError(c, "invalid_grant", "登录会话已结束，请重新登录");
-    const user = await loadTourUser(c, row.account_id);
+    const user = await loadAccountUser(c, row.account_id);
     if (!user) return oauthJsonError(c, "invalid_grant", "账号不存在");
     const body = await issueTokens(c, {
       accountId: row.account_id,
@@ -411,7 +382,7 @@ app.post("/token", async (c) => {
       }
       return oauthJsonError(c, "invalid_grant", "refresh token 无效、已轮换或已过期");
     }
-    const user = await loadTourUser(c, row.account_id);
+    const user = await loadAccountUser(c, row.account_id);
     if (!user) return oauthJsonError(c, "invalid_grant", "账号不存在");
     // 刷新请求的 scope 参数按原 scope 处理（不支持缩窄，避免接入方误传把权限越刷越小）；
     // 刷新签发的 ID token 不带 nonce（OIDC Core §12.2）；沿用原 scope 与轮换族
@@ -441,12 +412,12 @@ app.get("/userinfo", async (c) => {
     return c.json({ error: "invalid_token" }, 401, { "WWW-Authenticate": 'Bearer error="invalid_token"' });
   }
   const accountId = Number(at.sub);
-  const user = Number.isInteger(accountId) ? await loadTourUser(c, accountId) : null;
+  const user = Number.isInteger(accountId) ? await loadAccountUser(c, accountId) : null;
   if (!user) {
     return c.json({ error: "invalid_token" }, 401, { "WWW-Authenticate": 'Bearer error="invalid_token"' });
   }
   // 角色/权限点按 access token 的 aud 过滤，防止跨系统信息泄漏（TECH_DESIGN §6.3）
-  const roles = await rolesForAud(c, user.id, at.aud, user.role);
+  const roles = await rolesForAud(c, user.id, at.aud);
   const qq = await c.env.DB.prepare(
     "SELECT provider_uid FROM identity WHERE account_id = ? AND provider = 'qq' LIMIT 1",
   )
@@ -454,8 +425,8 @@ app.get("/userinfo", async (c) => {
     .first<{ provider_uid: string }>();
   const out: Record<string, unknown> = {
     sub: String(user.id),
-    locked: user.locked === 1,
-    must_change_pw: user.must_change_pw === 1,
+    locked: user.locked,
+    must_change_pw: user.mustChangePassword,
     roles,
     permissions: await permissionsFor(c, at.aud, roles),
     qq: qq?.provider_uid ?? null,

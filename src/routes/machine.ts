@@ -11,7 +11,7 @@ import { clientIp, nowIso } from "../lib/util";
 const app = new Hono<AppEnv>();
 
 async function displayNameOf(c: { env: AppEnv["Bindings"] }, accountId: number): Promise<string | null> {
-  const row = await c.env.TOUR_DB.prepare("SELECT name FROM user WHERE id = ?")
+  const row = await c.env.DB.prepare("SELECT name FROM account WHERE id = ?")
     .bind(accountId)
     .first<{ name: string }>();
   return row?.name ?? null;

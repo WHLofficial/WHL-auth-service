@@ -39,6 +39,28 @@ try {
   console.log("（限流键清理跳过：如遇 429 请等 15 分钟窗口过去再跑）");
 }
 
+// —— 前置：账号收口迁移（P0-11，幂等，等价部署 runbook 的迁移步骤） ——
+// 收口后 auth 只认自己的 account/credential；冒烟前复位 tour 种子账号（改密段会改掉密码，
+// 历史轮次也可能在 tour 侧留过漂移），再同步到 auth 并应用最新迁移。
+// register 段会在 auth 侧新建账号（auth 多于 tour 属收口后的合法状态），校验用 --allow-extra。
+{
+  const wrangler = fileURLToPath(new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url));
+  const cli = (args) => execFileSync(process.execPath, [wrangler, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
+  const run = (script, args = []) =>
+    execFileSync(process.execPath, [fileURLToPath(new URL(script, import.meta.url)), ...args], { encoding: "utf8" });
+  try {
+    const { d1Exec } = await import("./lib/d1.mjs");
+    cli(["d1", "migrations", "apply", "whl-auth", "--local"]);
+    d1Exec("whl", run("./seed-local-users.mjs"));
+    const sql = run("./migrate-accounts.mjs");
+    cli(["d1", "execute", "whl-auth", "--local", "--command", sql]);
+    console.log("（种子账号已复位 + 账号收口迁移已执行）");
+  } catch (e) {
+    console.error(`账号收口迁移失败，冒烟无从继续：${String(e.message ?? e).split("\n")[0].slice(0, 200)}`);
+    process.exit(1);
+  }
+}
+
 // —— 前置：账号级授权播种（P0-10，幂等） ——
 // 放在任何 HTTP 请求之前：本地 miniflare 的 D1 落盘会让 dev server 短暂重连，
 // 运行中写库/查库会让在途请求（或 wrangler CLI 的 dev 代理握手）吃 ECONNRESET（曾实测）。
@@ -71,6 +93,21 @@ try {
 } catch (e) {
   grantSeedErr = String(e.message ?? e).split("\n")[0].slice(0, 160);
   console.log(`（授权播种失败：${grantSeedErr}）`);
+}
+
+// —— 前置：迁移校验闸门（P0-11）：校验不过不跑冒烟 ——
+{
+  try {
+    const out = execFileSync(
+      process.execPath,
+      [fileURLToPath(new URL("./verify-accounts.mjs", import.meta.url)), "--allow-extra"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] },
+    );
+    console.log(`（迁移校验：${out.trim().split("\n").pop()}）`);
+  } catch (e) {
+    console.error("账号收口校验未通过，拒绝继续冒烟（校验不过不切读）。");
+    process.exit(1);
+  }
 }
 
 const BASE = "http://127.0.0.1:8792";
@@ -304,22 +341,22 @@ console.log("== 权限点播种与下发等价（P0-10） ==");
   ok("授权播种脚本执行成功（幂等，可重复）", grantSeedErr === "", grantSeedErr);
   const adminRoles = grantsById.get(adminSub) ?? [];
   ok(
-    `admin 账号（sub=${adminSub}）授权 = tour.recorder + guess.admin + club.admin`,
-    adminRoles.join(",") === "club.admin,guess.admin,tour.recorder",
+    `admin 账号（sub=${adminSub}）授权 = tour.recorder + tour.coach + guess.admin + club.admin + club.coach（P0-11 补播 coach）`,
+    adminRoles.join(",") === "club.admin,club.coach,guess.admin,tour.coach,tour.recorder",
     adminRoles.join(","),
   );
 
   // 同一登录会话（oidctest3）分别向三个 client 取 token：§6.3 按 aud 过滤 + 精确权限集（不越界、不缺失）
   const cases = {
-    tour: { client: "tour", redirectUri: "https://tour.whleague.win/api/auth/callback", roles: ["tour.recorder"], perms: ["tour.match.manage", "tour.team.bindcode.issue"] },
+    tour: { client: "tour", redirectUri: "https://tour.whleague.win/api/auth/callback", roles: ["tour.coach", "tour.recorder"], perms: ["tour.match.manage", "tour.team.bindcode.issue", "tour.team.bind"] },
     guess: { client: "guess", redirectUri: "https://guess.whleague.win/api/auth/callback", roles: ["guess.admin"], perms: ["guess.event.manage", "guess.payout.reverse", "guess.recon.view", "guess.users.manage"] },
   };
   for (const [aud, e] of Object.entries(cases)) {
     const a = await authorize({ client: e.client, redirectUri: e.redirectUri });
     const t = (await exchange(a.params.code, a.verifier, { client: e.client, redirectUri: e.redirectUri })).json;
     const ui = await (await req("GET", "/userinfo", { headers: { authorization: `Bearer ${t.access_token}` } })).json();
-    ok(`aud=${aud} 角色集精确`, JSON.stringify([...ui.roles].sort()) === JSON.stringify(e.roles), JSON.stringify(ui.roles));
-    ok(`aud=${aud} 权限集精确等于映射表`, JSON.stringify([...ui.permissions].sort()) === JSON.stringify(e.perms), JSON.stringify(ui.permissions));
+    ok(`aud=${aud} 角色集精确`, JSON.stringify([...ui.roles].sort()) === JSON.stringify([...e.roles].sort()), JSON.stringify(ui.roles));
+    ok(`aud=${aud} 权限集精确等于映射表`, JSON.stringify([...ui.permissions].sort()) === JSON.stringify([...e.perms].sort()), JSON.stringify(ui.permissions));
   }
 }
 
@@ -547,8 +584,8 @@ console.log("== P0-10：superadmin 全局角色（§6.2 首行） ==");
   const ui = await req("GET", "/userinfo", { headers: { authorization: `Bearer ${t.access_token}` } });
   const sb = await ui.json();
   ok(
-    "superadmin 拿到全局角色 superadmin + club 视角的兼容换算角色",
-    ui.status === 200 && [...sb.roles].sort().join(",") === "club.admin,superadmin",
+    "superadmin 只拿全局角色（收口后 TRANSITION_ROLES 换算表已删）",
+    ui.status === 200 && [...sb.roles].sort().join(",") === "superadmin",
     JSON.stringify(sb.roles),
   );
   ok(
@@ -561,6 +598,40 @@ console.log("== P0-10：superadmin 全局角色（§6.2 首行） ==");
     (grantsById.get(sb.sub) ?? []).join(",") === "(global).superadmin",
     (grantsById.get(sb.sub) ?? []).join(","),
   );
+}
+
+console.log("== 注册（P0-11 收口后写 auth 库：account+credential+user_role 同批） ==");
+{
+  jar.clear();
+  // 本地 allow_open_reg=1（迁移自 tour organization）：无注册码 → 锁定观众号（locked=1、无角色授权）
+  const page = await req("GET", "/register");
+  const csrf = /name="csrf" value="([^"]+)"/.exec(await page.text())?.[1];
+  ok("前置：注册页可取 csrf", typeof csrf === "string");
+  const name = `reg${Date.now() % 1_000_000}`;
+  const reg = await req("POST", "/register", {
+    body: new URLSearchParams({ csrf, name, password: "RegPass123", email: `${name}@example.com` }).toString(),
+  });
+  ok("开放注册成功 303 回首页", reg.status === 303 && location(reg) === "/");
+  const home = await req("GET", "/");
+  ok("注册即登录（注册时已签发会话）", home.status === 200 && (await home.text()).includes(name));
+  // 新观众号无任何 user_role → roles 空；locked 随账号下发；邮箱落在 account 表
+  const a = await authorize();
+  ok("新账号静默发码（注册会话有效）", a.res.status === 303 && typeof a.params.code === "string");
+  const t = (await exchange(a.params.code, a.verifier)).json;
+  const ui = await (await req("GET", "/userinfo", { headers: { authorization: `Bearer ${t.access_token}` } })).json();
+  ok(
+    "观众号 userinfo：locked=true + 默认 coach 投影（与旧行为等价，解锁即可用）+ email 落库",
+    ui.locked === true && ui.roles.length === 1 && ui.roles[0] === "club.coach" && ui.email === `${name}@example.com`,
+    JSON.stringify(ui),
+  );
+  // 重名注册（register 段新建的账号下轮冒烟由 --allow-extra 吸收，不破坏迁移校验）
+  jar.clear();
+  const page2 = await req("GET", "/register");
+  const csrf2 = /name="csrf" value="([^"]+)"/.exec(await page2.text())?.[1];
+  const dup = await req("POST", "/register", {
+    body: new URLSearchParams({ csrf: csrf2, name, password: "RegPass123" }).toString(),
+  });
+  ok("重名注册 409", dup.status === 409 && (await dup.text()).includes("这个昵称已被占用"));
 }
 
 console.log(`\n结果：${passed} 过 / ${failed} 挂`);
