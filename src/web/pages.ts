@@ -70,9 +70,17 @@ ${opts.next ? `<input type="hidden" name="next" value="${esc(opts.next)}">` : ""
   );
 }
 
-export function homePage(opts: { csrf: string; user: SessionUser; notice?: string }): string {
+export function homePage(opts: {
+  csrf: string;
+  user: SessionUser;
+  qq: string | null;
+  notice?: string;
+}): string {
   const u = opts.user;
   const roleLabel = u.role === "superadmin" ? "超级管理员" : u.role === "admin" ? "管理员" : "教练";
+  const qqCell = opts.qq
+    ? esc(opts.qq)
+    : `<a href="/bind">去绑定</a>`;
   return page(
     "我的账号",
     `<p class="sub">你好，${esc(u.name)}。</p>
@@ -81,12 +89,49 @@ ${u.mustChangePassword ? `<p class="notice">密码刚被重置，请先<a href="
 <dl>
 <div class="kv"><dt>昵称</dt><dd>${esc(u.name)}</dd></div>
 <div class="kv"><dt>角色</dt><dd>${roleLabel}</dd></div>
+<div class="kv"><dt>QQ 绑定</dt><dd>${qqCell}</dd></div>
 ${u.locked ? `<div class="kv"><dt>账号状态</dt><dd>受限（观众号），解锁前不能绑队</dd></div>` : ""}
 </dl>
 <form method="post" action="/logout">
 <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
 <button type="submit" class="btn2">登出</button>
 </form>`,
+  );
+}
+
+/** QQ 绑定页（P0-8）：生成一次性码 → QQ 群「绑定 <码>」由插件核销；解绑在 QQ 群发「解绑」 */
+export function bindPage(opts: {
+  csrf: string;
+  qq: string | null;
+  boundAt: string | null;
+  code?: string;
+  error?: string;
+}): string {
+  const boundBox = opts.qq
+    ? `<dl>
+<div class="kv"><dt>已绑定 QQ</dt><dd>${esc(opts.qq)}</dd></div>
+${opts.boundAt ? `<div class="kv"><dt>绑定时间</dt><dd>${esc(opts.boundAt)}</dd></div>` : ""}
+</dl>
+<p class="hint">解绑请在本 QQ 的群聊里发送「解绑」；换绑 = 解绑后重新生成绑定码。解绑、换绑不影响积分余额。</p>
+<form method="post" action="/bind/code">
+<input type="hidden" name="csrf" value="${esc(opts.csrf)}">
+<button type="submit" class="btn2">重新生成绑定码</button>
+</form>`
+    : opts.code
+      ? `<p class="sub">在 QQ 群里发送下面这条消息：</p>
+<p class="center"><code class="kbd">绑定 ${esc(opts.code)}</code></p>
+<p class="hint">10 分钟内有效，一次一用；机器人回复确认即绑定成功。</p>`
+      : `<p class="sub">绑定后，各系统积分才能自动发到你的 QQ 上。</p>
+<form method="post" action="/bind/code">
+<input type="hidden" name="csrf" value="${esc(opts.csrf)}">
+<button type="submit">生成绑定码</button>
+</form>
+<p class="hint">生成后按提示在 QQ 群发送「绑定 码」完成绑定。</p>`;
+  return page(
+    "QQ 绑定",
+    `${opts.error ? `<p class="msg">${esc(opts.error)}</p>` : ""}
+${boundBox}
+<p class="foot"><a href="/">返回我的账号</a></p>`,
   );
 }
 

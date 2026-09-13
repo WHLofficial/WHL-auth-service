@@ -40,6 +40,11 @@ dl { margin: 8px 0 0; }
   border-bottom: 1px solid #eef0f2; font-size: 14px; }
 .kv dt { color: #6a7280; margin: 0; }
 .kv dd { margin: 0; text-align: right; }
+.kv dd a { color: #2563eb; text-decoration: none; }
+.center { text-align: center; margin: 12px 0 0; }
+.kbd { display: inline-block; padding: 10px 16px; font-size: 20px; letter-spacing: 2px;
+  background: #eef0f3; border: 1px solid #cdd2d9; border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 `;
 
 export function page(title: string, body: string): string {

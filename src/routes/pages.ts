@@ -8,7 +8,7 @@ import { hashPassword, sha256Hex, verifyPassword } from "../lib/crypto";
 import { rateLimit } from "../lib/ratelimit";
 import { SESSION_COOKIE, createSession, destroySession, revokeSessionAndNotify } from "../lib/session";
 import { clientIp } from "../lib/util";
-import { homePage, loginPage, passwordPage, registerPage } from "../web/pages";
+import { bindPage, homePage, loginPage, passwordPage, registerPage } from "../web/pages";
 
 const app = new Hono<AppEnv>();
 
@@ -17,6 +17,18 @@ type Form = Record<string, unknown>;
 function formValue(form: Form, key: string): string {
   const v = form[key];
   return typeof v === "string" ? v : "";
+}
+
+/** 当前账号的 QQ 绑定（identity 表，P0-8 起启用；没有则 null） */
+async function qqBindingOf(c: Context<AppEnv>, accountId: number): Promise<{ provider_uid: string; bound_at: string } | null> {
+  return c.env.DB.prepare("SELECT provider_uid, bound_at FROM identity WHERE account_id = ? AND provider = 'qq'")
+    .bind(accountId)
+    .first<{ provider_uid: string; bound_at: string }>();
+}
+
+/** 6 位数字绑定码（2^32 取模的微量偏移对 10 分钟一次性码无影响） */
+function sixDigitCode(): string {
+  return String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, "0");
 }
 
 /** 只接受站内相对路径，防开放跳转与头部注入（登录/注册/改密后的 ?next）。
@@ -40,7 +52,8 @@ app.get("/", async (c) => {
   if (!user) return c.redirect("/login", 303);
   const csrf = await ensureCsrfToken(c);
   const notice = c.req.query("notice") === "pw_changed" ? "密码已更新" : undefined;
-  return c.html(homePage({ csrf, user, notice }));
+  const binding = await qqBindingOf(c, user.id);
+  return c.html(homePage({ csrf, user, qq: binding?.provider_uid ?? null, notice }));
 });
 
 app.get("/login", async (c) => {
@@ -254,6 +267,48 @@ app.post("/password", async (c) => {
   await audit(c, "pw.change", { accountId: user.id });
   const nx = safeNext(form.next);
   return c.redirect(nx === "/" ? "/?notice=pw_changed" : nx, 303);
+});
+
+// ---------- QQ 绑定（P0-8，TECH_DESIGN §7） ----------
+// 码只出现在已登录的绑定页（防冒充四重校验之一）；「绑定 <码>」由插件 HMAC 调
+// /api/bind/claim 核销（routes/machine.ts）；解绑在 QQ 群发「解绑」走 /api/identity/unbind。
+
+app.get("/bind", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.redirect(`/login?next=${encodeURIComponent("/bind")}`, 303);
+  const csrf = await ensureCsrfToken(c);
+  const binding = await qqBindingOf(c, user.id);
+  return c.html(bindPage({ csrf, qq: binding?.provider_uid ?? null, boundAt: binding?.bound_at ?? null }));
+});
+
+// 生成一次性绑定码：10 分钟、一次一用；新码发出即作废同账号旧码
+app.post("/bind/code", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.redirect("/login", 303);
+  const form = (await c.req.parseBody().catch(() => ({}))) as Form;
+  // 重渲染带上实时绑定态：已绑定用户看到的是绑定卡片 + 错误提示，而不是未绑定的生成表单
+  const render = async (opts: { code?: string; error?: string }, status: 200 | 400 | 403 | 429 = 200) => {
+    const binding = await qqBindingOf(c, user.id);
+    return c.html(
+      bindPage({ csrf: await ensureCsrfToken(c), qq: binding?.provider_uid ?? null, boundAt: binding?.bound_at ?? null, ...opts }),
+      status,
+    );
+  };
+  if (!csrfValid(c, form.csrf)) return render({ error: CSRF_EXPIRED }, 403);
+  if (!(await rateLimit(c.env, `bind-code:${user.id}`, 5, 900))) {
+    return render({ error: "生成太频繁，请 15 分钟后再来" }, 429);
+  }
+  const binding = await qqBindingOf(c, user.id);
+  if (binding) return render({ error: "该账号已绑定过 QQ，请先解绑再重新生成" }, 400);
+  const now = new Date();
+  await c.env.DB.prepare("DELETE FROM bind_code WHERE account_id = ? AND used_at IS NULL").bind(user.id).run();
+  const code = sixDigitCode();
+  await c.env.DB.prepare(
+    "INSERT INTO bind_code (code_hash, account_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+  )
+    .bind(await sha256Hex(code), user.id, now.toISOString(), new Date(now.getTime() + 600_000).toISOString())
+    .run();
+  return render({ code });
 });
 
 app.post("/logout", async (c) => {
