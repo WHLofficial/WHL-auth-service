@@ -13,6 +13,8 @@ export type Bindings = {
   COOKIE_DOMAIN?: string;
   /** OIDC RS256 签名私钥（PKCS8，PEM 或单行 base64 均可），kid 取公钥 JWK 指纹自动派生（TECH_DESIGN §9.4） */
   AUTH_JWT_PRIVATE_KEY?: string;
+  /** QQ 绑定通道密钥（积分插件 ↔ auth 机器端点验签，TECH_DESIGN §7.4）。独立密钥，不复用 guess 的 SYNC_SECRET */
+  BIND_SECRET?: string;
 };
 
 export type SessionUser = {

@@ -3,6 +3,7 @@ import type { AppEnv } from "./env";
 import { getSessionUser } from "./lib/session";
 import routes from "./routes/pages";
 import oidcRoutes from "./routes/oidc";
+import machineRoutes from "./routes/machine";
 import { errorPage } from "./web/pages";
 
 const app = new Hono<AppEnv>();
@@ -32,6 +33,7 @@ app.get("/healthz", (c) => c.json({ ok: true }));
 
 app.route("/", routes);
 app.route("/", oidcRoutes);
+app.route("/", machineRoutes);
 
 app.notFound((c) => c.html(errorPage(404), 404));
 
