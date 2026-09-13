@@ -120,6 +120,27 @@ export async function verifyIdTokenHint(
   }
 }
 
+/** back-channel 登出通知（OIDC Back-Channel Logout 1.0）：
+ *  - 必带 events/jti + sid、sub 之一，绝不能带 nonce（RP 靠「有 nonce 即拒」防误用）；
+ *  - 不设 exp：一次性通知消息，签名即失效边界，重放无害（RP 只按 sid 吊销）。 */
+export async function signLogoutToken(
+  env: Bindings,
+  iss: string,
+  claims: { aud: string; sub: string; sid: string; jti: string },
+): Promise<string> {
+  const key = await signingKey(env);
+  const payload: JWTPayload = {
+    iss,
+    aud: claims.aud,
+    sub: claims.sub,
+    sid: claims.sid,
+    jti: claims.jti,
+    iat: Math.floor(Date.now() / 1000),
+    events: { "http://schemas.openid.net/event/backchannel-logout": {} },
+  };
+  return new SignJWT(payload).setProtectedHeader({ alg: "RS256", kid: key.kid }).sign(key.privateKey);
+}
+
 /** RFC 7636 S256：base64url(sha256(verifier)) 与 challenge 常数时间比对 */
 export async function verifyPkce(challenge: string, verifier: string): Promise<boolean> {
   if (!/^[A-Za-z0-9\-._~]{43,128}$/.test(verifier)) return false;

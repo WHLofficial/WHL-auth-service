@@ -6,7 +6,7 @@ import { audit } from "../lib/audit";
 import { randomToken, sha256Hex } from "../lib/crypto";
 import { signRs256, signingKey, verifyAccessToken, verifyIdTokenHint, verifyPkce } from "../lib/oidc";
 import { rateLimit } from "../lib/ratelimit";
-import { SESSION_COOKIE, destroySession, revokeSessionTokens } from "../lib/session";
+import { SESSION_COOKIE, destroySession, revokeSessionAndNotify } from "../lib/session";
 import { clientIp, nowIso } from "../lib/util";
 import { oidcErrorPage } from "../web/pages";
 
@@ -78,6 +78,7 @@ app.get("/.well-known/openid-configuration", (c) => {
       "name",
       "preferred_username",
       "email",
+      "sid",
       "locked",
       "must_change_pw",
       "roles",
@@ -85,6 +86,8 @@ app.get("/.well-known/openid-configuration", (c) => {
       "qq",
     ],
     authorization_response_iss_parameter_supported: true,
+    backchannel_logout_supported: true,
+    backchannel_logout_session_supported: true,
   });
 });
 
@@ -252,8 +255,9 @@ async function issueTokens(
     { sub: String(args.accountId), aud: args.clientId, scope: args.scope, jti: randomToken(16) },
     ACCESS_TTL,
   );
-  // ID token 保持最小集：身份信息走 userinfo（§6.3 按 aud 过滤，token 体积可控）
-  const idClaims: Record<string, unknown> = { sub: String(args.accountId), aud: args.clientId };
+  // ID token 保持最小集：身份信息走 userinfo（§6.3 按 aud 过滤，token 体积可控）；
+  // sid = 登录会话指纹，RP 存下来即可被 back-channel 登出按会话精准命中
+  const idClaims: Record<string, unknown> = { sub: String(args.accountId), aud: args.clientId, sid: args.sessionHash };
   if (args.nonce) idClaims.nonce = args.nonce;
   if (scopes.includes("profile")) idClaims.name = args.user.name;
   const idToken = await signRs256(c.env, iss, idClaims, ID_TTL);
@@ -507,12 +511,11 @@ app.get("/logout", async (c) => {
   const sessionToken = getCookie(c, SESSION_COOKIE);
   const user = c.get("user");
   if (sessionToken) {
-    // §3 登出语义：吊销 auth 会话 + 该会话签发的全部 token
-    await revokeSessionTokens(c, await sha256Hex(sessionToken));
+    // §3 登出语义：吊销 auth 会话 + 该会话签发的全部 token，并向各 client 发 back-channel 通知
+    await revokeSessionAndNotify(c, await sha256Hex(sessionToken));
     await destroySession(c);
     if (user) await audit(c, "logout", { accountId: user.id, detail: { via: "end_session" } });
   }
-  // back-channel logout_token 推送在 club 接入（P0-5）时一并实现——当前没有 client 消费它
   if (postLogout) {
     const apps = await c.env.DB.prepare("SELECT post_logout_redirect_uris FROM app").all<{
       post_logout_redirect_uris: string;

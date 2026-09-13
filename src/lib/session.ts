@@ -2,6 +2,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Context } from "hono";
 import type { AppEnv, SessionUser } from "../env";
 import { randomToken, sha256Hex } from "./crypto";
+import { signLogoutToken } from "./oidc";
 import { nowIso } from "./util";
 
 export const SESSION_COOKIE = "whl_session";
@@ -102,4 +103,57 @@ export async function revokeSessionTokens(c: Context<AppEnv>, sessionHash: strin
   await c.env.DB.prepare("UPDATE oidc_refresh SET revoked_at = ? WHERE session_hash = ? AND revoked_at IS NULL")
     .bind(nowIso(), sessionHash)
     .run();
+}
+
+/**
+ * 全局登出传播（TECH_DESIGN §8.7 / PRD P0-9）：在吊销之外，逐个向该会话换过 token 的
+ * client 的 backchannel_logout_uri POST logout_token JWT，client 据此清掉自己的本地登录态。
+ * 推送走 waitUntil 不拖慢登出响应；单个 client 失败只记日志（RP 侧还有 refresh 7 天兜底）。
+ * 三个销毁会话的入口都应改调本函数而不是 revokeSessionTokens。
+ */
+export async function revokeSessionAndNotify(c: Context<AppEnv>, sessionHash: string): Promise<void> {
+  // 先取参与 client 再吊销：吊销后按 revoked_at 查就是空集
+  const rows = await c.env.DB.prepare(
+    "SELECT DISTINCT client_id, account_id FROM oidc_refresh WHERE session_hash = ? AND revoked_at IS NULL",
+  )
+    .bind(sessionHash)
+    .all<{ client_id: string; account_id: number }>();
+  await revokeSessionTokens(c, sessionHash);
+  const clients = [...new Set(rows.results.map((r) => r.client_id))];
+  if (clients.length === 0) return;
+  const iss = new URL(c.req.url).origin;
+  const sub = String(rows.results[0].account_id); // 同一会话只可能属于一个账号
+  let waitUntil: ((p: Promise<unknown>) => void) | null = null;
+  try {
+    waitUntil = c.executionCtx.waitUntil.bind(c.executionCtx);
+  } catch {
+    // app.request 直调（测试）没有 executionCtx：退化为就地 await
+  }
+  for (const clientId of clients) {
+    const appRow = await c.env.DB.prepare("SELECT backchannel_logout_uri FROM app WHERE client_id = ?")
+      .bind(clientId)
+      .first<{ backchannel_logout_uri: string | null }>();
+    if (!appRow?.backchannel_logout_uri) continue;
+    const uri = appRow.backchannel_logout_uri;
+    const job = (async () => {
+      try {
+        const token = await signLogoutToken(c.env, iss, {
+          aud: clientId,
+          sub,
+          sid: sessionHash,
+          jti: randomToken(16),
+        });
+        const res = await fetch(uri, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ logout_token: token }).toString(),
+        });
+        if (!res.ok) console.error(`back-channel 登出通知 ${clientId} 失败：HTTP ${res.status}`);
+      } catch (err) {
+        console.error(`back-channel 登出通知 ${clientId} 失败：`, err);
+      }
+    })();
+    if (waitUntil) waitUntil(job);
+    else await job;
+  }
 }
