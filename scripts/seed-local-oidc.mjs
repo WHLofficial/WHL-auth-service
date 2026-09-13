@@ -1,10 +1,11 @@
 // 本地 OIDC 联调 fixture（只写本地 miniflare 库——生产白名单里绝不允许出现 localhost）：
 //   SQL=$(node scripts/seed-local-oidc.mjs) && npx wrangler d1 execute whl-auth --local --command "$SQL"
-// 做三件事：
+// 做四件事：
 //   1. 注册本地冒烟 RP（smoke-rp），back-channel 收端点固定在 127.0.0.1:8793（smoke-oidc.mjs 内置临时监听）；
 //   2. 给 club 追加本地回调/登出地址（127.0.0.1:8795，club 项目 scripts/smoke-oidc-local.mjs 用）；
-//   3. 给 guess 追加本地回调/登出地址（127.0.0.1:8796，guess 项目 scripts/smoke-oidc-local.mjs 用）。
-//      guess 的 app 行若不存在先 INSERT（生产接入 guess 时由部署清单建行，这里保证本地可跑）。
+//   3. 给 guess 追加本地回调/登出地址（127.0.0.1:8796，guess 项目 scripts/smoke-oidc-local.mjs 用）；
+//   4. 给 tour 追加本地回调/登出地址（127.0.0.1:8797，tour 项目 scripts/smoke-oidc-local.mjs 用）。
+//      club/guess/tour 的 app 行若不存在先 INSERT（生产接入时由部署清单建行，这里保证本地可跑）。
 // 注意：输出必须是单行——wrangler 的 --command 在 Windows 下多行实参会在换行处被截断。
 const CLUB_LOCAL_REDIRECT = "http://127.0.0.1:8795/api/auth/callback";
 const CLUB_LOCAL_POST_LOGOUT = "http://127.0.0.1:8795/";
@@ -14,10 +15,21 @@ const GUESS_LOCAL_REDIRECT = "http://127.0.0.1:8796/api/auth/callback";
 const GUESS_LOCAL_POST_LOGOUT = "http://127.0.0.1:8796/";
 const GUESS_LOCAL_BACKCHANNEL = "http://127.0.0.1:8796/api/auth/backchannel-logout";
 
+const TOUR_LOCAL_REDIRECT = "http://127.0.0.1:8797/api/auth/callback";
+const TOUR_LOCAL_POST_LOGOUT = "http://127.0.0.1:8797/";
+const TOUR_LOCAL_BACKCHANNEL = "http://127.0.0.1:8797/api/auth/backchannel-logout";
+
 const clubRedirectUris = JSON.stringify(["https://club.whleague.win/api/auth/callback", CLUB_LOCAL_REDIRECT]);
 const clubPostLogouts = JSON.stringify(["https://club.whleague.win/", CLUB_LOCAL_POST_LOGOUT]);
 const guessRedirectUris = JSON.stringify(["https://guess.whleague.win/api/auth/callback", GUESS_LOCAL_REDIRECT]);
 const guessPostLogouts = JSON.stringify(["https://guess.whleague.win/", GUESS_LOCAL_POST_LOGOUT]);
+// tour 线上有主域与子域两个入口，回调/登出白名单都收；back-channel 取主域（单一收端点）
+const tourRedirectUris = JSON.stringify([
+  "https://whleague.win/api/auth/callback",
+  "https://tour.whleague.win/api/auth/callback",
+  TOUR_LOCAL_REDIRECT,
+]);
+const tourPostLogouts = JSON.stringify(["https://whleague.win/", "https://tour.whleague.win/", TOUR_LOCAL_POST_LOGOUT]);
 
 const statements = [
   `INSERT INTO app (client_id, name, redirect_uris, post_logout_redirect_uris, backchannel_logout_uri, created_at)
@@ -33,6 +45,12 @@ const statements = [
    WHERE client_id = 'club'`,
   `INSERT INTO app (client_id, name, redirect_uris, post_logout_redirect_uris, backchannel_logout_uri, created_at)
    VALUES ('guess', 'WHL 竞猜系统', '${guessRedirectUris}', '${guessPostLogouts}', '${GUESS_LOCAL_BACKCHANNEL}', '2026-09-13T00:00:00.000Z')
+   ON CONFLICT(client_id) DO UPDATE SET
+     redirect_uris = excluded.redirect_uris,
+     post_logout_redirect_uris = excluded.post_logout_redirect_uris,
+     backchannel_logout_uri = excluded.backchannel_logout_uri`,
+  `INSERT INTO app (client_id, name, redirect_uris, post_logout_redirect_uris, backchannel_logout_uri, created_at)
+   VALUES ('tour', 'WHL 赛事平台', '${tourRedirectUris}', '${tourPostLogouts}', '${TOUR_LOCAL_BACKCHANNEL}', '2026-09-13T00:00:00.000Z')
    ON CONFLICT(client_id) DO UPDATE SET
      redirect_uris = excluded.redirect_uris,
      post_logout_redirect_uris = excluded.post_logout_redirect_uris,
