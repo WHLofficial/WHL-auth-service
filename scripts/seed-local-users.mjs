@@ -19,6 +19,8 @@ const users = [
   ["oidctest4", "test4@example.com", hash("TestPass123"), "admin", 0, 0],
   ["oidctest5", "test5@example.com", hash("TestPass123"), "admin", 0, 0],
   ["oidctest6", "test6@example.com", hash("TestPass123"), "admin", 0, 0],
+  // superadmin 仅用于 §6.2 首行（全局角色）覆盖，冒烟里登录一次
+  ["oidctest7", "test7@example.com", hash("TestPass123"), "superadmin", 0, 0],
 ];
 
 const rows = users

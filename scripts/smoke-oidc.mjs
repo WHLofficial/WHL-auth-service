@@ -5,7 +5,8 @@
 // 覆盖：discovery/jwks、登录跳转、authorize 发码、PKCE 正反例、code 烧毁与重放联动吊销、
 //       refresh 轮换/并发双花/重用检测吊销整族、revoke、userinfo（含篡改负例）、
 //       back-channel logout_token 推送、end_session 登出联动、must_change 用户的改密不断链、
-//       兼容期共享 KV 会话键删除（P0-9，tour/guess/club 只读 KV 的登出可见性）。
+//       兼容期共享 KV 会话键删除（P0-9，tour/guess/club 只读 KV 的登出可见性）、
+//       权限点播种与按 aud 下发的行为等价（P0-10）。
 import { createHash, createPublicKey, createVerify, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { writeFileSync, unlinkSync } from "node:fs";
@@ -36,6 +37,40 @@ try {
   }
 } catch {
   console.log("（限流键清理跳过：如遇 429 请等 15 分钟窗口过去再跑）");
+}
+
+// —— 前置：账号级授权播种（P0-10，幂等） ——
+// 放在任何 HTTP 请求之前：本地 miniflare 的 D1 落盘会让 dev server 短暂重连，
+// 运行中写库/查库会让在途请求（或 wrangler CLI 的 dev 代理握手）吃 ECONNRESET（曾实测）。
+let grantSeedErr = "";
+const grantsById = new Map(); // account_id → ["app.role", ...]，按实际账号核对（不硬编码 id）
+try {
+  const wrangler = fileURLToPath(new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url));
+  const cli = (args) => execFileSync(process.execPath, [wrangler, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  const seedSql = execFileSync(process.execPath, [fileURLToPath(new URL("./seed-grants.mjs", import.meta.url))], {
+    encoding: "utf8",
+  });
+  cli(["d1", "execute", "whl-auth", "--local", "--command", seedSql]);
+  // 回读全部授权行（§6.2 映射结果），失败重试两次
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const out = cli([
+        "d1", "execute", "whl-auth", "--local", "--json", "--command",
+        "SELECT ur.account_id AS id, COALESCE(r.app_id,'(global)') || '.' || r.key AS k FROM user_role ur JOIN role r ON r.id = ur.role_id ORDER BY ur.account_id, k",
+      ]);
+      for (const row of JSON.parse(out)[0].results) {
+        grantsById.set(String(row.id), [...(grantsById.get(String(row.id)) ?? []), row.k]);
+      }
+      break;
+    } catch (e) {
+      if (attempt >= 3) throw e;
+      await new Promise((r) => setTimeout(r, 800));
+    }
+  }
+  console.log(`（已按 §6.2 播种账号级授权 ${grantsById.size} 个账号）`);
+} catch (e) {
+  grantSeedErr = String(e.message ?? e).split("\n")[0].slice(0, 160);
+  console.log(`（授权播种失败：${grantSeedErr}）`);
 }
 
 const BASE = "http://127.0.0.1:8792";
@@ -70,19 +105,27 @@ function cookieHeader() {
   return [...jar.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
 }
 async function req(method, path, { body, headers = {} } = {}) {
-  const res = await fetch(BASE + path, {
-    method,
-    redirect: "manual",
-    headers: {
-      cookie: cookieHeader(),
-      "cf-connecting-ip": RUN_IP,
-      ...(body ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
-      ...headers,
-    },
-    body,
-  });
-  absorb(res);
-  return res;
+  // 本地 dev 的 miniflare 在 D1 落盘后会短暂重连，首次请求偶发 ECONNRESET：重试一次即可
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const res = await fetch(BASE + path, {
+        method,
+        redirect: "manual",
+        headers: {
+          cookie: cookieHeader(),
+          "cf-connecting-ip": RUN_IP,
+          ...(body ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
+          ...headers,
+        },
+        body,
+      });
+      absorb(res);
+      return res;
+    } catch (e) {
+      if (attempt >= 3 || !["ECONNRESET", "ECONNREFUSED", "UND_ERR_SOCKET"].includes(e.cause?.code ?? "")) throw e;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
 }
 const location = (res) => res.headers.get("location") ?? "";
 const qsOf = (u) => Object.fromEntries(new URL(u, BASE).searchParams);
@@ -222,10 +265,12 @@ let tokensB;
 }
 
 console.log("== userinfo ==");
+let adminSub = ""; // 本段登录账号（admin）的 account id，供 P0-10 段核对授权行
 {
   const ui = await req("GET", "/userinfo", { headers: { authorization: `Bearer ${tokensB.access_token}` } });
   const body = await ui.json();
   const idSub = jwtDecode(tokensB.id_token).payload.sub;
+  adminSub = idSub;
   ok("userinfo 200 + sub 与 ID token 同源", ui.status === 200 && body.sub === idSub && /^\d+$/.test(body.sub), JSON.stringify(body));
   ok("aud 过滤角色（admin→club.admin，无 tour 角色）", body.roles.includes("club.admin") && !body.roles.includes("tour.recorder"));
   ok("权限点按角色下发", body.permissions.includes("club.clubs.manage") && body.permissions.includes("club.registrations.manage") && !body.permissions.includes("tour.match.manage"));
@@ -236,6 +281,31 @@ console.log("== userinfo ==");
   ok("篡改 token 401", (await req("GET", "/userinfo", { headers: { authorization: `Bearer ${tampered}` } })).status === 401);
   const stillOk = await req("GET", "/userinfo", { headers: { authorization: `Bearer ${tokensB.access_token}` } });
   ok("access token 与 refresh 生命周期独立", stillOk.status === 200);
+}
+
+console.log("== 权限点播种与下发等价（P0-10） ==");
+{
+  // §6.2 行为等价：tour user.role → user_role 授权（播种与回读都在脚本开头完成，读 grantsById）
+  ok("授权播种脚本执行成功（幂等，可重复）", grantSeedErr === "", grantSeedErr);
+  const adminRoles = grantsById.get(adminSub) ?? [];
+  ok(
+    `admin 账号（sub=${adminSub}）授权 = tour.recorder + guess.admin + club.admin`,
+    adminRoles.join(",") === "club.admin,guess.admin,tour.recorder",
+    adminRoles.join(","),
+  );
+
+  // 同一登录会话（oidctest3）分别向三个 client 取 token：§6.3 按 aud 过滤 + 精确权限集（不越界、不缺失）
+  const cases = {
+    tour: { client: "tour", redirectUri: "https://tour.whleague.win/api/auth/callback", roles: ["tour.recorder"], perms: ["tour.match.manage", "tour.team.bindcode.issue"] },
+    guess: { client: "guess", redirectUri: "https://guess.whleague.win/api/auth/callback", roles: ["guess.admin"], perms: ["guess.event.manage", "guess.payout.reverse", "guess.recon.view", "guess.users.manage"] },
+  };
+  for (const [aud, e] of Object.entries(cases)) {
+    const a = await authorize({ client: e.client, redirectUri: e.redirectUri });
+    const t = (await exchange(a.params.code, a.verifier, { client: e.client, redirectUri: e.redirectUri })).json;
+    const ui = await (await req("GET", "/userinfo", { headers: { authorization: `Bearer ${t.access_token}` } })).json();
+    ok(`aud=${aud} 角色集精确`, JSON.stringify([...ui.roles].sort()) === JSON.stringify(e.roles), JSON.stringify(ui.roles));
+    ok(`aud=${aud} 权限集精确等于映射表`, JSON.stringify([...ui.permissions].sort()) === JSON.stringify(e.perms), JSON.stringify(ui.permissions));
+  }
 }
 
 console.log("== refresh 轮换与重用检测 ==");
@@ -444,7 +514,38 @@ console.log("== must_change 用户：改密不断链 ==");
   const g = await exchange(qsOf(location(back)).code, a.verifier);
   ok("改密链路换出的 code 能正常换 token", g.res.status === 200 && g.json.access_token);
   const ui = await req("GET", "/userinfo", { headers: { authorization: `Bearer ${g.json.access_token}` } });
-  ok("userinfo 反映新用户（sub=4，coach）", ui.status === 200 && (await ui.json()).roles.includes("club.coach"));
+  const coachBody = await ui.json();
+  ok("userinfo 反映新用户（coach → club.coach）", ui.status === 200 && coachBody.roles.includes("club.coach"));
+  const coachRoles = grantsById.get(coachBody.sub) ?? [];
+  ok(`coach 账号（sub=${coachBody.sub}）授权 = tour.coach + club.coach`, coachRoles.join(",") === "club.coach,tour.coach", coachRoles.join(","));
+}
+
+console.log("== P0-10：superadmin 全局角色（§6.2 首行） ==");
+{
+  jar.clear();
+  const a = await authorize();
+  const loginRes = await login("oidctest7", "TestPass123", a.authorizeUrl);
+  ok("前置：superadmin 登录成功", loggedIn());
+  const back = await req("GET", location(loginRes));
+  const t = (await exchange(qsOf(location(back)).code, a.verifier)).json;
+  ok("前置：换到 access_token", typeof t.access_token === "string");
+  const ui = await req("GET", "/userinfo", { headers: { authorization: `Bearer ${t.access_token}` } });
+  const sb = await ui.json();
+  ok(
+    "superadmin 拿到全局角色 superadmin + club 视角的兼容换算角色",
+    ui.status === 200 && [...sb.roles].sort().join(",") === "club.admin,superadmin",
+    JSON.stringify(sb.roles),
+  );
+  ok(
+    "superadmin 持全部权限点（含三系统各一个）",
+    sb.permissions.length >= 17 && ["tour.match.manage", "guess.recon.view", "club.compliance.view"].every((k) => sb.permissions.includes(k)),
+    `count=${sb.permissions.length}`,
+  );
+  ok(
+    "superadmin 授权行来自全局角色（role.app_id IS NULL）",
+    (grantsById.get(sb.sub) ?? []).join(",") === "(global).superadmin",
+    (grantsById.get(sb.sub) ?? []).join(","),
+  );
 }
 
 console.log(`\n结果：${passed} 过 / ${failed} 挂`);
