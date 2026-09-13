@@ -1,10 +1,41 @@
 // OIDC Provider 全链路冒烟（本地 wrangler dev 8792）：
 //   node scripts/smoke-oidc.mjs
-// 前置：scripts/seed-local-users.mjs 播种过本地 whl 库（oidctest / oidctest2）。
+// 前置：scripts/seed-local-users.mjs 播种过本地 whl 库（oidctest 系列账号，登录按账号分摊防限流自爆）；
+//       scripts/seed-local-oidc.mjs 播种过本地 auth 库（smoke-rp 假 RP + club 本地回调）。
 // 覆盖：discovery/jwks、登录跳转、authorize 发码、PKCE 正反例、code 烧毁与重放联动吊销、
 //       refresh 轮换/并发双花/重用检测吊销整族、revoke、userinfo（含篡改负例）、
-//       end_session 登出联动、must_change 用户的改密不断链。
+//       back-channel logout_token 推送、end_session 登出联动、must_change 用户的改密不断链。
 import { createHash, createPublicKey, createVerify, randomBytes } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { writeFileSync, unlinkSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import http from "node:http";
+
+// —— 前置：清理上一轮冒烟留下的账号级限流键 ——
+// login/pwd 限流按账号计数（IP 键已由随机 RUN_IP 隔离），连跑会被上一轮的尝试 429 卡死。
+// 只动本地 miniflare KV 的 rl:login-name:* / rl:pwd:*；没有 --remote，生产 KV 无从触及。
+// wrangler 命令清不动（如版本差异）就忽略，靠 15 分钟窗口自愈。
+try {
+  const wrangler = fileURLToPath(new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url));
+  const list = execFileSync(process.execPath, [wrangler, "kv", "key", "list", "--binding", "RL_KV", "--local"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  const keys = JSON.parse(list)
+    .map((k) => k.name)
+    .filter((n) => n.startsWith("rl:login-name:") || n.startsWith("rl:pwd:"));
+  if (keys.length) {
+    const file = fileURLToPath(new URL(".smoke-rl-keys.json", import.meta.url));
+    writeFileSync(file, JSON.stringify(keys));
+    execFileSync(process.execPath, [wrangler, "kv", "bulk", "delete", file, "--binding", "RL_KV", "--local", "--force"], {
+      stdio: "ignore",
+    });
+    unlinkSync(file);
+    console.log(`（已清理本地限流键 ${keys.length} 个）`);
+  }
+} catch {
+  console.log("（限流键清理跳过：如遇 429 请等 15 分钟窗口过去再跑）");
+}
 
 const BASE = "http://127.0.0.1:8792";
 const CLIENT = "club";
@@ -54,6 +85,7 @@ async function req(method, path, { body, headers = {} } = {}) {
 }
 const location = (res) => res.headers.get("location") ?? "";
 const qsOf = (u) => Object.fromEntries(new URL(u, BASE).searchParams);
+const loggedIn = () => jar.has("whl_session");
 
 // ---- PKCE / JWT 工具 ----
 const b64url = (buf) => Buffer.from(buf).toString("base64url");
@@ -70,12 +102,20 @@ async function rs256Verify(jwt, pubkey) {
   return createVerify("RSA-SHA256").update(`${h}.${p}`).verify(pubkey, Buffer.from(s, "base64url"));
 }
 
-// 发起 authorize（可指定已有 verifier 以测负例），返回响应与发码 Location 参数
-async function authorize({ verifier: fixedVerifier, state = `st-${randomBytes(4).toString("hex")}`, nonce = `no-${randomBytes(4).toString("hex")}`, scope = "openid profile email" } = {}) {
+// 发起 authorize（可指定已有 verifier 以测负例；client/redirectUri 可换身份，如本地冒烟 RP），
+// 返回响应与发码 Location 参数
+async function authorize({
+  verifier: fixedVerifier,
+  state = `st-${randomBytes(4).toString("hex")}`,
+  nonce = `no-${randomBytes(4).toString("hex")}`,
+  scope = "openid profile email",
+  client = CLIENT,
+  redirectUri = REDIRECT_URI,
+} = {}) {
   const { verifier, challenge } = fixedVerifier ? { verifier: fixedVerifier, challenge: b64url(createHash("sha256").update(fixedVerifier).digest()) } : pkce();
   const u = new URL(`${BASE}/authorize`);
-  u.searchParams.set("client_id", CLIENT);
-  u.searchParams.set("redirect_uri", REDIRECT_URI);
+  u.searchParams.set("client_id", client);
+  u.searchParams.set("redirect_uri", redirectUri);
   u.searchParams.set("response_type", "code");
   u.searchParams.set("scope", scope);
   u.searchParams.set("state", state);
@@ -87,13 +127,13 @@ async function authorize({ verifier: fixedVerifier, state = `st-${randomBytes(4)
   return { res, params, verifier, state, nonce, authorizeUrl: u.pathname + u.search };
 }
 
-async function exchange(code, verifier) {
-  const body = new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: REDIRECT_URI, code_verifier: verifier, client_id: CLIENT });
+async function exchange(code, verifier, { client = CLIENT, redirectUri = REDIRECT_URI } = {}) {
+  const body = new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: redirectUri, code_verifier: verifier, client_id: client });
   const res = await req("POST", "/token", { body: body.toString() });
   return { res, json: res.status === 200 ? await res.json() : await res.json().catch(() => ({})) };
 }
-const refresh = (token) =>
-  req("POST", "/token", { body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: token, client_id: CLIENT }).toString() });
+const refresh = (token, client = CLIENT) =>
+  req("POST", "/token", { body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: token, client_id: client }).toString() });
 
 async function login(name, password, next) {
   const page = await req("GET", next ? `/login?next=${encodeURIComponent(next)}` : "/login");
@@ -143,7 +183,7 @@ console.log("== authorize：未登录跳登录 / 参数校验 ==");
   ok("缺 PKCE 跳错误到 client", noPkce.status === 303 && qsOf(location(noPkce)).error === "invalid_request");
 
   // 登录后重放 authorize（静默单点登录）
-  const loginRes = await login("oidctest", "TestPass123", a.authorizeUrl);
+  const loginRes = await login("oidctest3", "TestPass123", a.authorizeUrl);
   ok("登录成功回到 authorize", loginRes.status === 303 && location(loginRes).startsWith("/authorize"));
   const back = await req("GET", location(loginRes));
   ok("authorize 发码 + state + iss", back.status === 303 && typeof qsOf(location(back)).code === "string" && qsOf(location(back)).iss === BASE);
@@ -169,7 +209,7 @@ let tokensB;
   const idh = jwtDecode(tokensB.id_token);
   const jwksNow = (await (await fetch(`${BASE}/jwks.json`)).json()).keys[0];
   ok("ID token RS256 + kid 对上 jwks", idh.header.alg === "RS256" && idh.header.kid === jwksNow.kid);
-  ok("ID token claims", idh.payload.iss === BASE && idh.payload.aud === CLIENT && idh.payload.nonce === b.nonce && idh.payload.name === "oidctest");
+  ok("ID token claims", idh.payload.iss === BASE && idh.payload.aud === CLIENT && idh.payload.nonce === b.nonce && idh.payload.name === "oidctest3");
   ok("ID token 签名可验", await rs256Verify(tokensB.id_token, jwkPub));
   const at = jwtDecode(tokensB.access_token);
   ok("access token claims + 签名", at.payload.aud === CLIENT && at.payload.scope.includes("profile") && (await rs256Verify(tokensB.access_token, jwkPub)));
@@ -184,10 +224,11 @@ console.log("== userinfo ==");
 {
   const ui = await req("GET", "/userinfo", { headers: { authorization: `Bearer ${tokensB.access_token}` } });
   const body = await ui.json();
-  ok("userinfo 200 + sub", ui.status === 200 && body.sub === "3", JSON.stringify(body));
+  const idSub = jwtDecode(tokensB.id_token).payload.sub;
+  ok("userinfo 200 + sub 与 ID token 同源", ui.status === 200 && body.sub === idSub && /^\d+$/.test(body.sub), JSON.stringify(body));
   ok("aud 过滤角色（admin→club.admin，无 tour 角色）", body.roles.includes("club.admin") && !body.roles.includes("tour.recorder"));
   ok("权限点按角色下发", body.permissions.includes("club.clubs.manage") && body.permissions.includes("club.registrations.manage") && !body.permissions.includes("tour.match.manage"));
-  ok("profile/email claims", body.name === "oidctest" && body.email === "test@example.com");
+  ok("profile/email claims", body.name === "oidctest3" && body.email === "test3@example.com");
   ok("状态字段", body.locked === false && body.must_change_pw === false && body.qq === null);
   ok("无 token 401", (await req("GET", "/userinfo")).status === 401);
   const tampered = tokensB.access_token.slice(0, -3) + (tokensB.access_token.endsWith("aaa") ? "bbb" : "aaa");
@@ -224,10 +265,85 @@ console.log("== revoke ==");
   ok("revoke 无效 token 也 200（RFC 7009）", (await req("POST", "/revoke", { body: new URLSearchParams({ client_id: CLIENT, token: "not-a-token" }).toString() })).status === 200);
 }
 
+console.log("== back-channel 登出通知（logout_token 推送） ==");
+{
+  // 本地假 RP = seed-local-oidc.mjs 播种的 smoke-rp，收端点 127.0.0.1:8793 由这里临时起服务
+  const CLIENT_RP = "smoke-rp";
+  const REDIRECT_RP = "http://127.0.0.1:8792/smoke-cb";
+  const received = [];
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (ch) => (body += ch));
+    req.on("end", () => {
+      received.push(new URLSearchParams(body).get("logout_token"));
+      res.writeHead(200).end();
+    });
+  });
+  await new Promise((resolve) => server.listen(8793, "127.0.0.1", resolve));
+  try {
+    // oidctest3：back-channel 小节专属（登录限流按账号计数，各小节分摊用户防自爆）
+    jar.clear();
+    const a = await authorize({ client: CLIENT_RP, redirectUri: REDIRECT_RP });
+    const loginRes = await login("oidctest4", "TestPass123", a.authorizeUrl);
+    ok("前置：登录成功", loggedIn());
+    const back = await req("GET", location(loginRes));
+    const t = (await exchange(qsOf(location(back)).code, a.verifier, { client: CLIENT_RP, redirectUri: REDIRECT_RP })).json;
+    ok("smoke-rp 正常换取", typeof t.id_token === "string" && typeof t.refresh_token === "string");
+
+    const idPayload = jwtDecode(t.id_token).payload;
+    const idSid = idPayload.sid;
+    const sessionToken = jar.get("whl_session") ?? "";
+    ok(
+      "ID token 带 sid = 登录会话指纹",
+      typeof idSid === "string" && idSid === createHash("sha256").update(sessionToken).digest("hex"),
+      `sid=${idSid}`,
+    );
+
+    await req("GET", "/logout");
+    // 推送在 waitUntil 里跑，响应返回后才落地——轮询等它
+    let logoutToken = null;
+    for (let i = 0; i < 50 && !logoutToken; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      logoutToken = received.find(Boolean) ?? null;
+    }
+    ok("smoke-rp 收到 logout_token", typeof logoutToken === "string", `收到 ${received.length} 条`);
+    const lp = jwtDecode(logoutToken).payload;
+    ok("logout_token 签名可验", await rs256Verify(logoutToken, jwkPub));
+    ok(
+      "logout_token claims（iss/aud/sub/sid/jti/events，无 nonce）",
+      lp.iss === BASE &&
+        lp.aud === CLIENT_RP &&
+        lp.sub === idPayload.sub &&
+        lp.sid === idSid &&
+        typeof lp.jti === "string" &&
+        !!lp.events?.["http://schemas.openid.net/event/backchannel-logout"] &&
+        lp.nonce === undefined,
+      JSON.stringify(lp),
+    );
+    ok("登出后该 RP 的 refresh 全部吊销", (await refresh(t.refresh_token, CLIENT_RP)).status === 400);
+
+    // 没换过 token 的会话登出：不该有第二封通知
+    const before = received.length;
+    jar.clear();
+    await login("oidctest4", "TestPass123");
+    ok("前置：纯兼容会话已登录", loggedIn());
+    await req("GET", "/logout");
+    await new Promise((r) => setTimeout(r, 1500));
+    ok("纯兼容会话登出不推送", received.length === before, `收到 ${received.length - before} 条`);
+  } finally {
+    server.close();
+  }
+}
+
 console.log("== end_session 登出联动 ==");
 {
+  // back-channel 小节已把会话登出，这里必须重新建立登录态（oidctest4：小节专属）
+  jar.clear();
+  await login("oidctest5", "TestPass123");
+  ok("前置：登录成功", loggedIn());
   const f = await authorize();
   const t = (await exchange(f.params.code, f.verifier)).json;
+  ok("前置：code 已换 token", typeof t.refresh_token === "string");
   const lo = await req("GET", `/logout?post_logout_redirect_uri=${encodeURIComponent("https://club.whleague.win/")}&state=bye`);
   ok("登出 303 回白名单域名 + state", lo.status === 303 && location(lo).startsWith("https://club.whleague.win/") && qsOf(location(lo)).state === "bye");
   const badLo = await req("GET", `/logout?post_logout_redirect_uri=${encodeURIComponent("https://evil.example/")}`);
@@ -241,8 +357,10 @@ console.log("== end_session 登出联动 ==");
 
 console.log("== compat 登出/改密联动吊销（与 GET /logout 同口径） ==");
 {
+  // oidctest5/6：compat 小节专属（3 次登录分摊两个账号，规避 login-name 5 次/15 分钟限流）
   jar.clear();
-  await login("oidctest", "TestPass123");
+  await login("oidctest6", "TestPass123");
+  ok("前置：登录成功", loggedIn());
   const g = await authorize();
   const codeG = g.params.code;
   const home = await req("GET", "/");
@@ -252,19 +370,23 @@ console.log("== compat 登出/改密联动吊销（与 GET /logout 同口径） 
   ok("compat 登出后未换的 code 作废", (await exchange(codeG, g.verifier)).res.status === 400);
   // refresh 吊销验证需要真实 token，重新走一遍：登录 → 换 token → POST /logout → refresh 应死
   jar.clear();
-  await login("oidctest", "TestPass123");
+  await login("oidctest6", "TestPass123");
+  ok("前置：登录成功", loggedIn());
   const g2 = await authorize();
   const t = (await exchange(g2.params.code, g2.verifier)).json;
+  ok("前置：code 已换 token", typeof t.refresh_token === "string");
   const home2 = await req("GET", "/");
   const csrf2 = /name="csrf" value="([^"]+)"/.exec(await home2.text())?.[1];
   await req("POST", "/logout", { body: new URLSearchParams({ csrf: csrf2 }).toString() });
   ok("compat 登出吊销该会话 refresh", (await refresh(t.refresh_token)).status === 400);
 
-  // 改密轮换联动吊销
+  // 改密轮换联动吊销（改密会真的改掉密码，用池里的 oidctest6，seed 会重置回来）
   jar.clear();
-  await login("oidctest", "TestPass123");
+  await login("oidctest5", "TestPass123");
+  ok("前置：登录成功", loggedIn());
   const g3 = await authorize();
   const t3 = (await exchange(g3.params.code, g3.verifier)).json;
+  ok("前置：code 已换 token", typeof t3.refresh_token === "string");
   const pwPage = await req("GET", "/password");
   const pcsrf = /name="csrf" value="([^"]+)"/.exec(await pwPage.text())?.[1];
   const pwRes = await req("POST", "/password", {

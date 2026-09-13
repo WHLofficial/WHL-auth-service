@@ -10,8 +10,15 @@ function hash(pw) {
 }
 
 const users = [
+  // oidctest3..6 是冒烟的登录分摊池：login-name 限流 5 次/15 分钟按账号计数，
+  // 每轮冒烟对单账号登录 ≤2 次，两连跑（同窗口）最多 4 次，不互爆
+
   ["oidctest", "test@example.com", hash("TestPass123"), "admin", 0, 0],
   ["oidctest2", "test2@example.com", hash("OldPass999"), "coach", 0, 1],
+  ["oidctest3", "test3@example.com", hash("TestPass123"), "admin", 0, 0],
+  ["oidctest4", "test4@example.com", hash("TestPass123"), "admin", 0, 0],
+  ["oidctest5", "test5@example.com", hash("TestPass123"), "admin", 0, 0],
+  ["oidctest6", "test6@example.com", hash("TestPass123"), "admin", 0, 0],
 ];
 
 const rows = users
