@@ -4,7 +4,8 @@
 //       scripts/seed-local-oidc.mjs 播种过本地 auth 库（smoke-rp 假 RP + club 本地回调）。
 // 覆盖：discovery/jwks、登录跳转、authorize 发码、PKCE 正反例、code 烧毁与重放联动吊销、
 //       refresh 轮换/并发双花/重用检测吊销整族、revoke、userinfo（含篡改负例）、
-//       back-channel logout_token 推送、end_session 登出联动、must_change 用户的改密不断链。
+//       back-channel logout_token 推送、end_session 登出联动、must_change 用户的改密不断链、
+//       兼容期共享 KV 会话键删除（P0-9，tour/guess/club 只读 KV 的登出可见性）。
 import { createHash, createPublicKey, createVerify, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { writeFileSync, unlinkSync } from "node:fs";
@@ -361,12 +362,39 @@ console.log("== compat 登出/改密联动吊销（与 GET /logout 同口径） 
   jar.clear();
   await login("oidctest6", "TestPass123");
   ok("前置：登录成功", loggedIn());
+  // P0-9 兼容期 KV 语义核对（TECH_DESIGN §8.7）：tour/guess/club 只读共享 KV、不查 D1，
+  // 登出必须真的删掉 sess:{token} 键，三系统才能立刻回到未登录态（auth 自身还查 D1，
+  // 单看 auth 页面测不出 KV 删除失败，所以这里直接查 KV 落盘）
+  const rawToken = jar.get("whl_session");
+  const wrangler = fileURLToPath(new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url));
+  // 注意：wrangler kv key get 对不存在的键也可能退出码 0（只打印 "Value not found"），
+  // 不能靠进程退出码判断存在性，必须看输出内容；值形状是 {"userId":N}
+  const kvGet = (name) => {
+    try {
+      const out = execFileSync(process.execPath, [wrangler, "kv", "key", "get", name, "--binding", "SESSION_KV", "--local"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      return out.includes("Value not found") ? null : out;
+    } catch {
+      return null;
+    }
+  };
+  ok("前置：拿到原始会话 token", typeof rawToken === "string" && rawToken.length > 0);
+  let kvOk = false;
+  try {
+    kvOk = typeof JSON.parse(kvGet(`sess:${rawToken}`) ?? "").userId === "number";
+  } catch {
+    // 键不存在或值不是预期形状
+  }
+  ok("前置：兼容 KV 会话键在登出前存在", kvOk);
   const g = await authorize();
   const codeG = g.params.code;
   const home = await req("GET", "/");
   const csrf = /name="csrf" value="([^"]+)"/.exec(await home.text())?.[1];
   const lo = await req("POST", "/logout", { body: new URLSearchParams({ csrf }).toString() });
   ok("compat POST /logout 303", lo.status === 303);
+  ok("compat 登出删除共享 KV 会话键", kvGet(`sess:${rawToken}`) === null, "键仍存在，三系统会保持登录态至 TTL");
   ok("compat 登出后未换的 code 作废", (await exchange(codeG, g.verifier)).res.status === 400);
   // refresh 吊销验证需要真实 token，重新走一遍：登录 → 换 token → POST /logout → refresh 应死
   jar.clear();
