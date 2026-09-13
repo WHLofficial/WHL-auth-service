@@ -7,7 +7,7 @@ import { randomToken, sha256Hex } from "../lib/crypto";
 import { signRs256, signingKey, verifyAccessToken, verifyIdTokenHint, verifyPkce } from "../lib/oidc";
 import { rateLimit } from "../lib/ratelimit";
 import { SESSION_COOKIE, destroySession, revokeSessionAndNotify } from "../lib/session";
-import { clientIp, nowIso } from "../lib/util";
+import { clientIp, nowIso, parseUris } from "../lib/util";
 import { oidcErrorPage } from "../web/pages";
 
 const app = new Hono<AppEnv>();
@@ -21,15 +21,6 @@ type AppRow = {
   redirect_uris: string;
   post_logout_redirect_uris: string;
 };
-
-function parseUris(json: string): string[] {
-  try {
-    const v: unknown = JSON.parse(json);
-    return Array.isArray(v) ? v.filter((s): s is string => typeof s === "string") : [];
-  } catch {
-    return [];
-  }
-}
 
 async function loadApp(c: Context<AppEnv>, clientId: string): Promise<AppRow | null> {
   return c.env.DB.prepare("SELECT client_id, redirect_uris, post_logout_redirect_uris FROM app WHERE client_id = ?")

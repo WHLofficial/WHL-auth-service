@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { AppEnv } from "./env";
+import { contentSecurityPolicy } from "./lib/csp";
 import { getSessionUser } from "./lib/session";
 import routes from "./routes/pages";
 import oidcRoutes from "./routes/oidc";
@@ -23,10 +24,7 @@ app.use(async (c, next) => {
   c.header("Cache-Control", "no-store");
   // 全站经 CF 边缘走 HTTPS；HSTS 由 Worker 兜底（HTTP 响应按规范忽略此头）
   c.header("Strict-Transport-Security", "max-age=31536000");
-  c.header(
-    "Content-Security-Policy",
-    "default-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
-  );
+  c.header("Content-Security-Policy", await contentSecurityPolicy(c));
 });
 
 app.get("/healthz", (c) => c.json({ ok: true }));

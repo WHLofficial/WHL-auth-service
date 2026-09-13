@@ -6,6 +6,16 @@ export function nowIso(): string {
   return new Date().toISOString();
 }
 
+/** 解析 app 表里存 JSON 数组的地址列（redirect_uris / post_logout_redirect_uris），坏数据返回空数组 */
+export function parseUris(json: string): string[] {
+  try {
+    const v: unknown = JSON.parse(json);
+    return Array.isArray(v) ? v.filter((s): s is string => typeof s === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 /** 常数时间字符串比较，防时序侧信道（CSRF/PKCE 等场景共用） */
 export function timingSafeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;

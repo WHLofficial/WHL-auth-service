@@ -210,6 +210,21 @@ console.log("== 基础端点 ==");
   ok("jwks RSA + kid", jwks.keys?.[0]?.kty === "RSA" && /^[A-Za-z0-9\-_]{10,}$/.test(jwks.keys[0].kid));
 }
 
+console.log("== 登录页 CSP：form-action 必须放行 client 回调 origin ==");
+{
+  // 浏览器实测：Chromium 按 form-action 校验「表单提交触发的整条重定向链」，
+  // POST /login → 303 /authorize → 303 <client>/api/auth/callback 最后一跳跨 origin，
+  // 只写 'self' 就被静默拦下（页面停在登录页、输入值还在、无任何报错，表现即「登不上去」）。
+  // curl 冒烟不执行 CSP，所以这里直接断言响应头，防止策略被改回只允许同源。
+  const loginCsp = (await req("GET", "/login")).headers.get("content-security-policy") ?? "";
+  const formAction = loginCsp.split("form-action ")[1]?.split(";")[0] ?? "";
+  ok("登录页 form-action 仍含 'self'", formAction.includes("'self'"));
+  ok("登录页 form-action 放行本地 client 回调 origin", formAction.includes("http://127.0.0.1:8795"));
+  ok("登录页 form-action 放行生产 client origin", formAction.includes("https://club.whleague.win"));
+  const jsonCsp = (await fetch(`${BASE}/jwks.json`)).headers.get("content-security-policy") ?? "";
+  ok("机器接口（JSON）不派生 client origin", jsonCsp.includes("form-action 'self';") && !jsonCsp.includes("127.0.0.1:8795"));
+}
+
 console.log("== authorize：未登录跳登录 / 参数校验 ==");
 {
   jar.clear();
