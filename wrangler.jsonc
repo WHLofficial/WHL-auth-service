@@ -1,7 +1,7 @@
 {
-  // 部署前需先创建真实资源并替换占位 ID（TECH_DESIGN §9.4 部署清单）：
-  //   npx wrangler d1 create whl-auth        -> DB.database_id
-  //   npx wrangler secret put COOKIE_DOMAIN  -> ".whleague.win"
+  // 生产资源（2026-09-14 已建，TECH_DESIGN §9.4 部署清单）：
+  //   D1 whl-auth = b76d1129-…；secret COOKIE_DOMAIN / AUTH_JWT_PRIVATE_KEY / BIND_SECRET
+  //   重建流程：npx wrangler d1 create whl-auth --location apac -> 替换下方 database_id
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "whl-auth",
   "main": "src/index.ts",
@@ -10,7 +10,7 @@
     {
       "binding": "DB",
       "database_name": "whl-auth",
-      "database_id": "00000000-0000-0000-0000-000000000000"
+      "database_id": "b76d1129-77ae-4844-931c-1c7b00a9b048"
     }
     // 步骤③账号收口（P0-11）后 auth 不再绑定 tour 账号库；TOUR_DB 过渡绑定已移除（TECH_DESIGN §5.3）
   ],
@@ -32,5 +32,9 @@
   // 与 tour 一致：让计算靠近 D1（亚太）数据中心
   "placement": {
     "mode": "smart"
-  }
+  },
+  // 生产自定义域（TECH_DESIGN §9.4）：DNS 记录与证书由 Cloudflare 自动签发
+  "routes": [
+    { "pattern": "auth.whleague.win", "custom_domain": true }
+  ]
 }
