@@ -16,7 +16,7 @@ ${opts.next ? `<input type="hidden" name="next" value="${esc(opts.next)}">` : ""
 <button type="submit">登录</button>
 </form>
 <p class="foot">没有账号？<a href="/register">注册</a></p>`,
-    "欢迎回到WHL足球联赛",
+    "欢迎回到 WHL 足球联赛",
   );
 }
 
@@ -50,7 +50,7 @@ ${opts.error ? `<p class="msg">${esc(opts.error)}</p>` : ""}
 <button type="submit">注册</button>
 </form>
 <p class="foot">已有账号？<a href="/login">登录</a></p>`,
-    "欢迎来到WHL足球联赛",
+    "欢迎来到 WHL 足球联赛",
   );
 }
 
