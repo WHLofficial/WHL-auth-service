@@ -1,6 +1,14 @@
 import type { SessionUser } from "../env";
 import { esc, page } from "./layout";
 
+/** 首页登出下方的三系统入口；域名与 migrations/0003_oidc.sql 登出白名单一致 */
+const SYSTEM_LINKS: { label: string; url: string; cls: string; hidden?: boolean }[] = [
+  { label: "去赛事平台", url: "https://tour.whleague.win/", cls: "jump-tour" },
+  { label: "去竞猜系统", url: "https://guess.whleague.win/", cls: "jump-guess" },
+  // club 入口暂不展示（2026-09-14 决定先 hidden），恢复时删掉 hidden: true
+  { label: "去俱乐部平台", url: "https://club.whleague.win/", cls: "jump-club", hidden: true },
+];
+
 export function loginPage(opts: { csrf: string; next?: string; error?: string }): string {
   return page(
     "登录",
@@ -94,10 +102,12 @@ ${u.mustChangePassword ? `<p class="notice">密码刚被重置，请先<a href="
 <div class="kv"><dt>QQ 绑定</dt><dd>${qqCell}</dd></div>
 ${u.locked ? `<div class="kv"><dt>账号状态</dt><dd>受限（观众号），解锁前不能绑队</dd></div>` : ""}
 </dl>
+<a class="btn2" href="/password">改密码</a>
 <form method="post" action="/logout">
 <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
 <button type="submit" class="btn2">登出</button>
-</form>`,
+</form>
+${SYSTEM_LINKS.map((s) => `<a class="jump ${s.cls}"${s.hidden ? " hidden" : ""} href="${s.url}">${s.label}</a>`).join("\n")}`,
   );
 }
 

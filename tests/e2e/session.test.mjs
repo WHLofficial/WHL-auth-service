@@ -157,3 +157,25 @@ test("改密的三类拒绝：缺 CSRF 403、新密码太弱 400、旧密码错 
   const fresh = new Client(H.BASE);
   assert.equal((await H.signIn(fresh, u.name, PW)).status, 303, "原密码仍应有效");
 });
+
+test("首页入口：改密码在登出上方，三系统跳转在登出下方（club 先 hidden）", async () => {
+  const u = await freshUser("homeentry");
+  const r = await u.client.get("/");
+  assert.equal(r.status, 200, "登录后应能访问首页");
+  const html = await r.text();
+
+  const pwIdx = html.indexOf('<a class="btn2" href="/password">改密码</a>');
+  const logoutIdx = html.indexOf('action="/logout"');
+  assert.notEqual(pwIdx, -1, "首页应有改密码入口");
+  assert.notEqual(logoutIdx, -1, "首页应有登出表单");
+  assert.ok(pwIdx < logoutIdx, "改密码按钮应在登出按钮上方");
+
+  const tourIdx = html.indexOf('href="https://tour.whleague.win/"');
+  const guessIdx = html.indexOf('href="https://guess.whleague.win/"');
+  const clubIdx = html.indexOf('href="https://club.whleague.win/"');
+  assert.notEqual(tourIdx, -1, "应有去赛事平台跳转");
+  assert.notEqual(guessIdx, -1, "应有去竞猜系统跳转");
+  assert.notEqual(clubIdx, -1, "club 按钮应保留在 DOM（hidden）");
+  assert.ok(tourIdx > logoutIdx && guessIdx > logoutIdx, "赛事/竞猜跳转应在登出按钮下方");
+  assert.match(html, /<a class="jump jump-club" hidden href="https:\/\/club\.whleague\.win\/">/, "club 入口应带 hidden 属性");
+});

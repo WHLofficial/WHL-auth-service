@@ -45,6 +45,24 @@ dl { margin: 8px 0 0; }
 .kbd { display: inline-block; padding: 10px 16px; font-size: 20px; letter-spacing: 2px;
   background: #eef0f3; border: 1px solid #cdd2d9; border-radius: 8px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+a.btn2 { display: block; margin-top: 20px; padding: 10px 12px; font-size: 15px;
+  border-radius: 8px; background: #eef0f3; color: #1c1e21; text-align: center; text-decoration: none; }
+a.btn2:hover { background: #e2e5ea; }
+/* 三系统跳转按钮配色对齐生态内既有跳转入口：赛事=guess 顶栏去赛事平台的草坪绿条纹，
+   竞猜=tour 顶栏去竞猜站的冷青；发光本为深色顶栏设计，按白卡片调弱一档 */
+a.jump { display: block; margin-top: 8px; padding: 10px 12px; font-size: 15px;
+  border-radius: 8px; text-align: center; text-decoration: none; }
+a.jump-tour { border: 1px solid #0a3d24; color: #fff;
+  background: repeating-linear-gradient(90deg, rgba(255,255,255,.06) 0 9px, rgba(255,255,255,0) 9px 18px),
+    linear-gradient(180deg, #0e7a46, #0b6a3d 55%, #0a3d24);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.22), 0 0 10px rgba(40,190,110,.45), 0 0 22px rgba(40,190,110,.25); }
+a.jump-tour:hover { filter: brightness(1.07); }
+a.jump-guess { border: 1px solid #35a8c9; color: #06303d;
+  background: linear-gradient(180deg, #8fe6f7, #35a8c9);
+  box-shadow: 0 0 10px rgba(80,205,235,.45), 0 0 22px rgba(80,205,235,.22); }
+a.jump-guess:hover { filter: brightness(1.07); }
+a.jump-club { border: 1px solid #8e5426; color: #fff; background: linear-gradient(180deg, #b06d35, #a4612c); }
+a.jump-club:hover { filter: brightness(1.07); }
 `;
 
 export function page(title: string, body: string, heading = "WHL 统一登录"): string {
