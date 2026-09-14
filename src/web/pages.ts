@@ -4,7 +4,7 @@ import { esc, page } from "./layout";
 export function loginPage(opts: { csrf: string; next?: string; error?: string }): string {
   return page(
     "登录",
-    `<p class="sub">赛事、竞猜、俱乐部共用这个账号。</p>
+    `<p class="sub">赛事、竞猜、俱乐部共用这个账号。登录一次，三个系统都能进。</p>
 ${opts.error ? `<p class="msg">${esc(opts.error)}</p>` : ""}
 <form method="post" action="/login">
 <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
@@ -16,6 +16,7 @@ ${opts.next ? `<input type="hidden" name="next" value="${esc(opts.next)}">` : ""
 <button type="submit">登录</button>
 </form>
 <p class="foot">没有账号？<a href="/register">注册</a></p>`,
+    "欢迎回到WHL足球联赛",
   );
 }
 
@@ -49,6 +50,7 @@ ${opts.error ? `<p class="msg">${esc(opts.error)}</p>` : ""}
 <button type="submit">注册</button>
 </form>
 <p class="foot">已有账号？<a href="/login">登录</a></p>`,
+    "欢迎来到WHL足球联赛",
   );
 }
 

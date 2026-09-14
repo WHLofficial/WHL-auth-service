@@ -47,7 +47,7 @@ dl { margin: 8px 0 0; }
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 `;
 
-export function page(title: string, body: string): string {
+export function page(title: string, body: string, heading = "WHL 统一登录"): string {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -58,7 +58,7 @@ export function page(title: string, body: string): string {
 </head>
 <body>
 <main class="card">
-<h1>WHL 统一登录</h1>
+<h1>${esc(heading)}</h1>
 ${body}
 </main>
 </body>
