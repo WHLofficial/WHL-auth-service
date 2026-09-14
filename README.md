@@ -31,7 +31,7 @@ node scripts/generate-oidc-key.mjs > .dev.vars  # RS256 签名密钥（gitignore
 SQL=$(node scripts/seed-local-users.mjs) && npx wrangler d1 execute whl --local --command "$SQL"
 SQL=$(node scripts/seed-local-oidc.mjs) && npx wrangler d1 execute whl-auth --local --command "$SQL"
 npm run dev                                   # http://127.0.0.1:8792
-node scripts/smoke-oidc.mjs                   # 全链路冒烟（67 项断言，含 back-channel 推送）
+node scripts/smoke-oidc.mjs                   # 全链路冒烟（92 项断言，含 back-channel 推送）
 ```
 
 注意：本地 whl（tour）库需要先有表和用户；seed 脚本会幂等重置 `oidctest` 系列冒烟专用账号（改密用例会真改密码，重跑冒烟前先重新 seed）。
@@ -39,6 +39,5 @@ node scripts/smoke-oidc.mjs                   # 全链路冒烟（67 项断言�
 ## 部署前置（未执行，等用户确认）
 
 1. `npx wrangler d1 create whl-auth` → 替换 wrangler.jsonc 里 `DB` 的占位 id
-2. `npx wrangler kv namespace create RL_KV` → 替换 `RL_KV` 的占位 id
-3. `npx wrangler secret put COOKIE_DOMAIN`（`.whleague.win`）、`npx wrangler secret put AUTH_JWT_PRIVATE_KEY`
-4. DNS：auth.whleague.win Worker 自定义域；auth 域名不启 Browser 挑战
+2. `npx wrangler secret put COOKIE_DOMAIN`（`.whleague.win`）、`npx wrangler secret put AUTH_JWT_PRIVATE_KEY`
+3. DNS：auth.whleague.win Worker 自定义域；auth 域名不启 Browser 挑战

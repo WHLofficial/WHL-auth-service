@@ -3,9 +3,11 @@
 // 业务错误 400 {error, message}（invalid_code / qq_bound / user_bound / not_bound），验签失败 401。
 // 审计行与业务写入同一 batch（同库隐式事务）：绑定变更必有审计，不出现「已绑定但无审计」。
 import { Hono } from "hono";
+import type { Context } from "hono";
 import type { AppEnv } from "../env";
 import { sha256Hex } from "../lib/crypto";
 import { verifyBindSignature } from "../lib/hmac";
+import { rateLimit } from "../lib/ratelimit";
 import { clientIp, nowIso } from "../lib/util";
 
 const app = new Hono<AppEnv>();
@@ -17,7 +19,15 @@ async function displayNameOf(c: { env: AppEnv["Bindings"] }, accountId: number):
   return row?.name ?? null;
 }
 
+// 纵深防御（TEST_REPORT L-2）：HMAC 已把门，限流只用于挡签名密钥泄漏/插件失控后的高速滥用。
+// 键按 CF-Connecting-IP（CF 边缘注入、外部不可伪造），两端点共用一条 300/15min 的桶；
+// 配额宽松是有意的——scripts/smoke-bind.mjs 连跑几轮不该被自己的限流卡住。
+async function machineAllowed(c: Context<AppEnv>): Promise<boolean> {
+  return rateLimit(c.env, `machine:${clientIp(c)}`, 300, 900);
+}
+
 app.post("/api/bind/claim", async (c) => {
+  if (!(await machineAllowed(c))) return c.json({ error: "rate_limited", message: "请求太频繁，请稍后再试" }, 429);
   const secret = c.env.BIND_SECRET ?? "";
   if (!secret) return c.json({ error: "server_error", message: "服务端未配置 BIND_SECRET" }, 500);
   const raw = await c.req.text();
@@ -81,6 +91,7 @@ app.post("/api/bind/claim", async (c) => {
 });
 
 app.post("/api/identity/unbind", async (c) => {
+  if (!(await machineAllowed(c))) return c.json({ error: "rate_limited", message: "请求太频繁，请稍后再试" }, 429);
   const secret = c.env.BIND_SECRET ?? "";
   if (!secret) return c.json({ error: "server_error", message: "服务端未配置 BIND_SECRET" }, 500);
   const raw = await c.req.text();

@@ -1,7 +1,6 @@
 {
   // 部署前需先创建真实资源并替换占位 ID（TECH_DESIGN §9.4 部署清单）：
   //   npx wrangler d1 create whl-auth        -> DB.database_id
-  //   npx wrangler kv namespace create RL_KV -> RL_KV.id
   //   npx wrangler secret put COOKIE_DOMAIN  -> ".whleague.win"
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "whl-auth",
@@ -20,13 +19,13 @@
     {
       "binding": "SESSION_KV",
       "id": "87e2d78308bc47e9b36dc6de53be0458"
-    },
-    // auth 自有 KV：rl:* 限流等，与共享会话 KV 物理隔离（TECH_DESIGN §8.4）
-    {
-      "binding": "RL_KV",
-      "id": "00000000000000000000000000000000"
     }
+    // 限流不再走 KV（TEST_REPORT F-E/F-B）：计数落 D1 的 rate_limit 表，RL_KV 绑定与建号步骤一并移除
   ],
+  // 每日清理 rate_limit 表里过期的窗口行（src/index.ts 的 scheduled）
+  "triggers": {
+    "crons": ["23 4 * * *"]
+  },
   "observability": {
     "enabled": true
   },

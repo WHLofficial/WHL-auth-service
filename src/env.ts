@@ -5,8 +5,7 @@ export type Bindings = {
   DB: D1Database;
   /** 共享会话 KV（与 tour/guess 同一 namespace）：写 sess:* 兼容键，三系统零改动读取；收口后随 P0-13 停写移除 */
   SESSION_KV: KVNamespace;
-  /** auth 自有 KV：rl:* 限流等，与共享会话 KV 隔离（TECH_DESIGN §8.4） */
-  RL_KV: KVNamespace;
+  // 限流计数已迁 D1 rate_limit 表（TEST_REPORT F-E）：不再需要 RL_KV 绑定
   /** 会话 cookie 的 Domain 属性（".whleague.win"），同主域子系统共享登录态；不配则 host-only。生产用 secret 配置 */
   COOKIE_DOMAIN?: string;
   /** OIDC RS256 签名私钥（PKCS8，PEM 或单行 base64 均可），kid 取公钥 JWK 指纹自动派生（TECH_DESIGN §9.4） */

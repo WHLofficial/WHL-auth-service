@@ -5,7 +5,7 @@ import type { AppEnv } from "../env";
 import { audit } from "../lib/audit";
 import { csrfValid, ensureCsrfToken } from "../lib/csrf";
 import { PBKDF2_ITERATIONS, hashPassword, sha256Hex, verifyPassword } from "../lib/crypto";
-import { rateLimit } from "../lib/ratelimit";
+import { rateLimit, resetRateLimit } from "../lib/ratelimit";
 import { SESSION_COOKIE, createSession, destroySession, revokeSessionAndNotify } from "../lib/session";
 import { clientIp } from "../lib/util";
 import { bindPage, homePage, loginPage, passwordPage, registerPage } from "../web/pages";
@@ -63,7 +63,21 @@ app.get("/login", async (c) => {
   return c.html(loginPage({ csrf, next: c.req.query("next") }));
 });
 
-// 语义与 tour POST /api/auth/login 一致：IP 10/900s + 账号 5/900s 双限流
+// 账号不存在时也跑一次等价的 PBKDF2（同算法同迭代次数），免得「账号存在与否」被登录耗时区分出来（L-3）。
+// 盐由 hashPassword 现场生成，格式与真实凭证一致；模块级缓存一次，isolate 内复用。
+let dummyHashPromise: Promise<string> | null = null;
+function dummyPasswordHash(): Promise<string> {
+  return (dummyHashPromise ??= hashPassword("whl-dummy-password"));
+}
+
+/** 退还预扣的注册码名额：只在「已核销但建号失败」的补偿路径上调用（F-F）。 */
+async function refundSignupCode(c: Context<AppEnv>, code: string): Promise<void> {
+  await c.env.DB.prepare("UPDATE signup_code SET used_count = used_count - 1 WHERE code_hash = ? AND used_count > 0")
+    .bind(await sha256Hex(code))
+    .run();
+}
+
+// 语义与 tour POST /api/auth/login 一致：IP 10/900s + 同 IP 同账号 5/900s + 跨 IP 账号 50/900s 三重限流
 app.post("/login", async (c) => {
   const ip = clientIp(c);
   if (!(await rateLimit(c.env, `login-ip:${ip}`, 10, 900))) {
@@ -81,9 +95,18 @@ app.post("/login", async (c) => {
   if (!name) {
     return c.html(loginPage({ csrf: await ensureCsrfToken(c), error: "请输入昵称", next: formValue(form, "next") }), 400);
   }
-  if (!(await rateLimit(c.env, `login-name:${name}`, 5, 900))) {
-    await audit(c, "login.rate_limited", { detail: { scope: "name", name } });
-    return c.html(loginPage({ csrf: await ensureCsrfToken(c), error: "这个账号尝试太频繁，请 15 分钟后再来" }), 429);
+  const fail = async (status: 401 | 429, error: string) =>
+    c.html(loginPage({ csrf: await ensureCsrfToken(c), error, next: formValue(form, "next") }), status);
+  // 昵称先挡长度：注册侧限 1-32 字符，明显超长的输入直接按统一失败语义回（F-B：超长昵称
+  // 曾进 KV 键名把键撑爆成未认证 500；迁 D1 后已无此上限，守卫留着防脏数据进限流键）
+  if (name.length > 64) {
+    await audit(c, "login.fail", { detail: { name: name.slice(0, 64) } });
+    return fail(401, "昵称或密码不正确");
+  }
+  // 同 IP 同账号 5/900：只锁攻击者自己这条路，受害者换 IP 用正确密码不受影响（F-C）
+  if (!(await rateLimit(c.env, `login-name:${ip}:${name}`, 5, 900))) {
+    await audit(c, "login.rate_limited", { detail: { scope: "ip+name", name } });
+    return fail(429, "这个账号尝试太频繁，请 15 分钟后再来");
   }
   // 账号收口（P0-11）：账号/凭证真源 = auth 库 account/credential（TECH_DESIGN §5.3 终态）
   const row = await c.env.DB.prepare(
@@ -93,13 +116,18 @@ app.post("/login", async (c) => {
   )
     .bind(name)
     .first<{ id: number; locked: number; must_change_pw: number; password_hash: string }>();
-  if (!row || !(await verifyPassword(formValue(form, "password"), row.password_hash))) {
+  const passwordOk = await verifyPassword(formValue(form, "password"), row?.password_hash ?? (await dummyPasswordHash()));
+  if (!row || !passwordOk) {
     await audit(c, "login.fail", { detail: { name } });
-    return c.html(
-      loginPage({ csrf: await ensureCsrfToken(c), error: "昵称或密码不正确", next: formValue(form, "next") }),
-      401,
-    );
+    // 跨 IP 的账号桶只在失败路径计数（阈值高于单 IP 桶，兜分布式慢速爆破）；密码正确时
+    // 下面直接清零，所以攻击者累计失败也锁不住受害者（F-C）
+    if (!(await rateLimit(c.env, `login-acct:${name}`, 50, 900))) {
+      await audit(c, "login.rate_limited", { detail: { scope: "acct", name } });
+      return fail(429, "这个账号尝试太频繁，请 15 分钟后再来");
+    }
+    return fail(401, "昵称或密码不正确");
   }
+  await resetRateLimit(c.env, `login-acct:${name}`);
   await audit(c, "login.ok", { accountId: row.id });
   await createSession(c, row.id);
   if (row.must_change_pw === 1) {
@@ -221,6 +249,9 @@ app.post("/register", async (c) => {
   try {
     await c.env.DB.batch(stmts);
   } catch {
+    // 建号失败（并发同名撞 UNIQUE）就把上面预扣的名额还回去：核销在 batch 之外、batch 是
+    // 整体事务，失败即「没有账号」，退还不至于被白耗一个名额（F-F）
+    if (!isFirst && code) await refundSignupCode(c, code);
     return renderError("这个昵称已被占用", 409);
   }
   userId = (await c.env.DB.prepare("SELECT id FROM account WHERE name = ?").bind(name).first<{ id: number }>())!.id;

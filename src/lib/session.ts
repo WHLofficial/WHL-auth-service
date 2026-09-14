@@ -54,10 +54,13 @@ export async function getSessionUser(c: Context<AppEnv>): Promise<SessionUser | 
   // 账号收口（P0-11，TECH_DESIGN §9.1 ③）：会话只认 auth 库 session 行（auth 登录/注册
   // 一直双写 D1）。不再读共享 KV——tour 兼容登录页创建的纯 KV 旧会话在这里视为未登录，
   // 随 7 天 TTL 自然退役；KV 键保留只为旧 client 兼容模式与 R2 回滚，收口后随 P0-13 停写移除。
-  const sess = await c.env.DB.prepare("SELECT account_id, revoked_at FROM session WHERE token_hash = ?")
+  const sess = await c.env.DB.prepare(
+    "SELECT account_id, revoked_at, expires_at FROM session WHERE token_hash = ?",
+  )
     .bind(await sha256Hex(token))
-    .first<{ account_id: number; revoked_at: string | null }>();
-  if (!sess || sess.revoked_at) return null;
+    .first<{ account_id: number; revoked_at: string | null; expires_at: string }>();
+  // 过期判定必须在服务端做：cookie 的 Max-Age 只在浏览器侧生效，被复制的 token 不受它约束
+  if (!sess || sess.revoked_at || sess.expires_at <= nowIso()) return null;
   return loadAccountUser(c, sess.account_id);
 }
 
@@ -90,9 +93,10 @@ export async function revokeSessionTokens(c: Context<AppEnv>, sessionHash: strin
  * 三个销毁会话的入口都应改调本函数而不是 revokeSessionTokens。
  */
 export async function revokeSessionAndNotify(c: Context<AppEnv>, sessionHash: string): Promise<void> {
-  // 先取参与 client 再吊销：吊销后按 revoked_at 查就是空集
+  // 取该会话换过 token 的全部 client，不按 revoked_at 过滤：refresh 已被吊销（授权码重放检测、
+  // RP 自己调过 /revoke）不代表 RP 的本地登录态没了，正是这些 client 最需要收到通知。
   const rows = await c.env.DB.prepare(
-    "SELECT DISTINCT client_id, account_id FROM oidc_refresh WHERE session_hash = ? AND revoked_at IS NULL",
+    "SELECT DISTINCT client_id, account_id FROM oidc_refresh WHERE session_hash = ?",
   )
     .bind(sessionHash)
     .all<{ client_id: string; account_id: number }>();

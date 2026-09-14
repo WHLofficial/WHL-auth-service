@@ -337,10 +337,11 @@ app.post("/token", async (c) => {
     }
     // 会话吊销联动：发码用的登录会话若已登出，code 随之作废。
     // auth 登录页建的会话有 D1 行可查；tour 旧登录的会话无行，按存活处理（与 getSessionUser 口径一致）
-    const sess = await c.env.DB.prepare("SELECT revoked_at FROM session WHERE token_hash = ?")
+    const sess = await c.env.DB.prepare("SELECT revoked_at, expires_at FROM session WHERE token_hash = ?")
       .bind(row.session_hash)
-      .first<{ revoked_at: string | null }>();
-    if (sess?.revoked_at) return oauthJsonError(c, "invalid_grant", "登录会话已结束，请重新登录");
+      .first<{ revoked_at: string | null; expires_at: string }>();
+    if (sess && (sess.revoked_at || sess.expires_at <= nowIso()))
+      return oauthJsonError(c, "invalid_grant", "登录会话已结束，请重新登录");
     const user = await loadAccountUser(c, row.account_id);
     if (!user) return oauthJsonError(c, "invalid_grant", "账号不存在");
     const body = await issueTokens(c, {
@@ -405,6 +406,10 @@ app.post("/token", async (c) => {
 // ---------- userinfo ----------
 
 app.get("/userinfo", async (c) => {
+  // 纵深防御（TEST_REPORT L-2）：Bearer 已把门，这里只挡无 token 的高速扫描
+  if (!(await rateLimit(c.env, `userinfo:${clientIp(c)}`, 600, 900))) {
+    return oauthJsonError(c, "invalid_request", "请求太频繁，请 15 分钟后再试", 429);
+  }
   const m = /^Bearer\s+(.+)$/i.exec(c.req.header("Authorization") ?? "");
   const iss = new URL(c.req.url).origin;
   const at = m ? await verifyAccessToken(c.env, iss, m[1]) : null;
@@ -465,6 +470,12 @@ app.post("/revoke", async (c) => {
 // ---------- 登出（end_session_endpoint，RP 发起） ----------
 
 app.get("/logout", async (c) => {
+  // 跨站顶层导航同样会带上 SameSite=Lax 的会话 cookie，等于允许第三方页面强制登出本人（L-1）。
+  // 生态三系统同属 *.whleague.win（Sec-Fetch-Site: same-site），只有真正 cross-site 才拦；
+  // 不发这个头的旧浏览器按放行处理（fail-open），如实记在 TEST_REPORT L-1。
+  if ((c.req.header("Sec-Fetch-Site") ?? "").toLowerCase() === "cross-site") {
+    return c.redirect("/login", 303);
+  }
   const iss = new URL(c.req.url).origin;
   const postLogout = c.req.query("post_logout_redirect_uri");
   const state = c.req.query("state");

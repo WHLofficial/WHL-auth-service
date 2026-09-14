@@ -9,34 +9,22 @@
 //       权限点播种与按 aud 下发的行为等价（P0-10）。
 import { createHash, createPublicKey, createVerify, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { writeFileSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import http from "node:http";
 
-// —— 前置：清理上一轮冒烟留下的账号级限流键 ——
+// —— 前置：清理上一轮冒烟留下的账号级限流计数 ——
 // login/pwd 限流按账号计数（IP 键已由随机 RUN_IP 隔离），连跑会被上一轮的尝试 429 卡死。
-// 只动本地 miniflare KV 的 rl:login-name:* / rl:pwd:*；没有 --remote，生产 KV 无从触及。
-// wrangler 命令清不动（如版本差异）就忽略，靠 15 分钟窗口自愈。
+// 计数在 D1 的 rate_limit 表（限流已从 KV 迁 D1，见 TEST_REPORT F-E）；只动本地 miniflare，
+// 没有 --remote。命令清不动（如版本差异）就忽略，靠 15 分钟窗口自愈。
 try {
   const wrangler = fileURLToPath(new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url));
-  const list = execFileSync(process.execPath, [wrangler, "kv", "key", "list", "--binding", "RL_KV", "--local"], {
+  execFileSync(process.execPath, [wrangler, "d1", "execute", "whl-auth", "--local", "--command", "DELETE FROM rate_limit;"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
   });
-  const keys = JSON.parse(list)
-    .map((k) => k.name)
-    .filter((n) => n.startsWith("rl:login-name:") || n.startsWith("rl:pwd:"));
-  if (keys.length) {
-    const file = fileURLToPath(new URL(".smoke-rl-keys.json", import.meta.url));
-    writeFileSync(file, JSON.stringify(keys));
-    execFileSync(process.execPath, [wrangler, "kv", "bulk", "delete", file, "--binding", "RL_KV", "--local", "--force"], {
-      stdio: "ignore",
-    });
-    unlinkSync(file);
-    console.log(`（已清理本地限流键 ${keys.length} 个）`);
-  }
+  console.log("（已清理本地限流计数）");
 } catch {
-  console.log("（限流键清理跳过：如遇 429 请等 15 分钟窗口过去再跑）");
+  console.log("（限流计数清理跳过：如遇 429 请等 15 分钟窗口过去再跑）");
 }
 
 // —— 前置：账号收口迁移（P0-11，幂等，等价部署 runbook 的迁移步骤） ——
@@ -114,7 +102,7 @@ const BASE = "http://127.0.0.1:8792";
 const CLIENT = "club";
 const REDIRECT_URI = "https://club.whleague.win/api/auth/callback";
 // 每次运行用随机源 IP：本地 dev 不经过 CF 边缘，worker 直接透传此头（clientIp 的取值），
-// 限流键（rl:*:{ip}）因此按运行隔离，连跑不互相挤兑 15 分钟固定窗口
+// 限流键（<scope>:<ip>）因此按运行隔离，连跑不互相挤兑 15 分钟固定窗口
 const RUN_IP = `10.${randomBytes(1)[0]}.${randomBytes(1)[0]}.${(randomBytes(1)[0] % 250) + 1}`;
 
 let passed = 0;
