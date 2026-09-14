@@ -6,5 +6,6 @@ node_modules/
 .prod-secrets.txt
 dist/
 .zcode/
+wrangler.test.jsonc
 *.log
 .DS_Store

@@ -4,7 +4,7 @@
 // 红线：全程只碰 --local 的本地 D1/KV，绝不 --remote、绝不 deploy。
 // 用法：npm run test        （AUTH_TEST_PORT=xxxx 可固定端口；AUTH_TEST_KEEP=1 保留测试态目录）
 import { spawn, spawnSync, execFileSync } from "node:child_process";
-import { mkdirSync, openSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { createHash, randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
@@ -41,6 +41,17 @@ function readDevVars() {
     /* 没有 .dev.vars 时绑定类测试会被跳过 */
   }
   return out;
+}
+
+// 测试实例专用 config：去掉 routes（wrangler dev 遇 custom_domain 会把 worker 看到的 Host
+// 重写成生产域 auth.whleague.win，issuer 相关断言全挂）。放在 ROOT 保证相对路径与 .dev.vars
+// 的解析行为和原配置一致；用完即删，.gitignore 兜底。
+function writeTestConfig() {
+  const src = readFileSync(join(ROOT, "wrangler.jsonc"), "utf8");
+  const stripped = src.replace(/\n\s*"routes":\s*\[[\s\S]*?\]/, "");
+  const path = join(ROOT, "wrangler.test.jsonc");
+  writeFileSync(path, stripped);
+  return path;
 }
 
 function wrangler(args, opts = {}) {
@@ -96,6 +107,7 @@ async function main(attempt = 0) {
   stopping = false;
   rmSync(STATE, { recursive: true, force: true });
   mkdirSync(STATE, { recursive: true });
+  const testConfig = writeTestConfig();
 
   console.log("==> 迁移本地 D1（隔离目录 .wrangler/test-state，不碰开发实例的库）");
   wrangler(["d1", "migrations", "apply", DB, "--local", "--persist-to", STATE], { stdio: "inherit" });
@@ -105,7 +117,7 @@ async function main(attempt = 0) {
   console.log(`==> 启动隔离实例 ${base}`);
 
   const fd = openSync(LOG, "a");
-  dev = spawn(process.execPath, [WRANGLER, "dev", "--port", String(port), "--persist-to", STATE, "--log-level", "info"], {
+  dev = spawn(process.execPath, [WRANGLER, "dev", "--config", testConfig, "--port", String(port), "--persist-to", STATE, "--log-level", "info"], {
     cwd: ROOT,
     stdio: ["ignore", fd, fd],
   });
@@ -217,6 +229,7 @@ try {
     // 等进程真正退出再删，否则 Windows 上删不掉被占用的 sqlite 文件。
     await sleep(500);
     rmSync(STATE, { recursive: true, force: true });
+    rmSync(join(ROOT, "wrangler.test.jsonc"), { force: true });
   } else {
     console.log(`==> 已保留测试态目录：${STATE}`);
   }
