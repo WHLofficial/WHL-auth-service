@@ -29,8 +29,8 @@ export function registerPage(opts: {
 }): string {
   const codeLabel = opts.openReg ? "注册码（选填）" : "注册码";
   const codeHint = opts.openReg
-    ? "没有注册码也能注册，账号会先受限（观众号），解锁前不能绑队。"
-    : "注册码向管理员要。";
+    ? "没有注册码也能注册，账号会先受限（观众号），解锁前不能绑队。注册码找管理组拿。"
+    : "注册码找管理组拿。";
   return page(
     "注册",
     `<p class="sub">注册后可登录赛事、竞猜、俱乐部。</p>
