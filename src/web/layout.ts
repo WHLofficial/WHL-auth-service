@@ -49,7 +49,8 @@ a.btn2 { display: block; margin-top: 20px; padding: 10px 12px; font-size: 15px;
   border-radius: 8px; background: #eef0f3; color: #1c1e21; text-align: center; text-decoration: none; }
 a.btn2:hover { background: #e2e5ea; }
 /* 三系统跳转按钮配色对齐生态内既有跳转入口：赛事=guess 顶栏去赛事平台的草坪绿条纹，
-   竞猜=tour 顶栏去竞猜站的冷青；发光本为深色顶栏设计，按白卡片调弱一档 */
+   竞猜=tour 顶栏去竞猜站的冷青，俱乐部=自家暖皮质感（压底边是 club styles.css 的招牌细节）；
+   发光本为深色顶栏设计，按白卡片调弱一档 */
 a.jump { display: block; margin-top: 8px; padding: 10px 12px; font-size: 15px;
   border-radius: 8px; text-align: center; text-decoration: none; }
 a.jump-tour { border: 1px solid #0a3d24; color: #fff;
@@ -61,7 +62,11 @@ a.jump-guess { border: 1px solid #35a8c9; color: #06303d;
   background: linear-gradient(180deg, #8fe6f7, #35a8c9);
   box-shadow: 0 0 10px rgba(80,205,235,.45), 0 0 22px rgba(80,205,235,.22); }
 a.jump-guess:hover { filter: brightness(1.07); }
-a.jump-club { border: 1px solid #8e5426; color: #fff; background: linear-gradient(180deg, #b06d35, #a4612c); }
+a.jump-club { border: 1px solid #87451c; color: #fff;
+  background: repeating-linear-gradient(90deg, rgba(255,255,255,.05) 0 9px, rgba(255,255,255,0) 9px 18px),
+    linear-gradient(180deg, #b06d35, #a4612c 55%, #8e5426);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.25), inset 0 -3px 0 rgba(75,38,16,.4),
+    0 0 10px rgba(230,160,90,.55), 0 0 22px rgba(230,160,90,.32); }
 a.jump-club:hover { filter: brightness(1.07); }
 `;
 
