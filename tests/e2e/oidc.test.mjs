@@ -314,3 +314,56 @@ test("内联发码回退：next 的 redirect_uri 非法时回退老链路，由 
   const err = await anon.get(back.pathname + back.search);
   assert.equal(err.status, 400, "非法回调地址应由 /authorize 渲染标准错误页");
 });
+
+test("prompt=none 静默探测：未登录回 login_required，不弹登录页", async () => {
+  const bc = await H.startBackchannel();
+  try {
+    H.setAppEndpoints({ origin: bc.origin });
+    const { verifier, challenge } = H.pkce();
+    const redirectUri = `${bc.origin}/cb`;
+    const anon = new Client(H.BASE);
+    const a = await H.authorize(anon, { clientId: H.TEST_APP, redirectUri, verifier, challenge, state: "st-silent", extra: { prompt: "none" } });
+    assert.equal(a.status, 303);
+    assert.equal(a.error, "login_required", "未登录应回 login_required");
+    assert.equal(a.code, null, "不得签发授权码");
+    assert.equal(loc(a.res).origin, bc.origin, "应跳回 RP 回调而不是登录页");
+    assert.equal(a.state, "st-silent", "state 应原样回传");
+    assert.equal(loc(a.res).pathname, "/cb", "绝不能落 auth 登录页");
+  } finally {
+    await bc.close();
+  }
+});
+
+test("prompt=none 已登录：照常静默发码", async () => {
+  const bc = await H.startBackchannel();
+  try {
+    H.setAppEndpoints({ origin: bc.origin });
+    const u = await freshUser("silentok");
+    const { verifier, challenge } = H.pkce();
+    const redirectUri = `${bc.origin}/cb`;
+    const a = await H.authorize(u.client, { clientId: H.TEST_APP, redirectUri, verifier, challenge, extra: { prompt: "none" } });
+    assert.equal(a.status, 303);
+    assert.ok(a.code, "已登录 prompt=none 应照常静默签发授权码");
+    assert.equal(a.error, null);
+  } finally {
+    await bc.close();
+  }
+});
+
+test("prompt=none + must_change_pw：回 interaction_required，保持静默", async () => {
+  const bc = await H.startBackchannel();
+  try {
+    H.setAppEndpoints({ origin: bc.origin });
+    const u = await freshUser("silentchg");
+    H.sqlExec(`UPDATE account SET must_change_pw = 1 WHERE name = '${u.name}';`);
+    const { verifier, challenge } = H.pkce();
+    const redirectUri = `${bc.origin}/cb`;
+    const a = await H.authorize(u.client, { clientId: H.TEST_APP, redirectUri, verifier, challenge, extra: { prompt: "none" } });
+    assert.equal(a.status, 303);
+    assert.equal(a.error, "interaction_required", "改密门禁在静默探测下应回 interaction_required");
+    assert.equal(a.code, null, "不得签发授权码");
+    assert.equal(loc(a.res).origin, bc.origin, "应跳回 RP 回调而不是改密页");
+  } finally {
+    await bc.close();
+  }
+});

@@ -19,7 +19,9 @@ app.use(async (c, next) => {
 // 强制改密门禁（PRD P0-2「must_change_pw 强制改密」）：管理员重置出来的临时密码只够进改密页，
 // 在改密完成前不得访问业务页、也不得走 /authorize 换授权码进三系统（改密链路靠 next 原样回跳）。
 // 放行的只有改密/登出/登录自身、静态契约（healthz/.well-known/jwks）与不依赖会话的机器端点。
-const PW_EXEMPT_PATHS = new Set(["/healthz", "/login", "/password", "/logout", "/jwks.json", "/userinfo", "/token", "/revoke"]);
+// /authorize 挪出中间件门禁：must_change_pw 的处理移入 authorize handler（oidc.ts），
+// 因为 prompt=none 静默探测要按规范回 RP 错误而不是跳改密页，而回跳目标必须先过 client 校验
+const PW_EXEMPT_PATHS = new Set(["/healthz", "/login", "/password", "/logout", "/jwks.json", "/userinfo", "/token", "/revoke", "/authorize"]);
 function pwExempt(path: string): boolean {
   return PW_EXEMPT_PATHS.has(path) || path.startsWith("/.well-known/") || path.startsWith("/api/");
 }

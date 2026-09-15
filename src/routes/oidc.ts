@@ -236,9 +236,23 @@ app.get("/authorize", async (c) => {
 
   const sessionToken = getCookie(c, SESSION_COOKIE);
   if (!sessionToken || !c.get("user")) {
+    // prompt=none（OIDC Core §3.1.2.1）：静默探测不许弹交互页——未登录按规范回 RP 错误，
+    // 三系统的自动同步探测全靠这里兜住，绝不打扰未登录访客
+    if (c.req.query("prompt") === "none") {
+      return c.redirect(oauthError(parsed.redirectUri, "login_required", "需要登录", parsed.state), 303);
+    }
     // 未登录：先登录，回来时原样重放本请求（state/nonce/challenge 全保留），实现静默单点登录
     const next = `/authorize${new URL(c.req.url).search}`;
     return c.redirect(`/login?next=${encodeURIComponent(next)}`, 303);
+  }
+  // must_change_pw 门禁（原在 index.ts 中间件，现移入此处——见 PW_EXEMPT_PATHS 注释）：
+  // 普通请求跳改密页保 next 链路；prompt=none 探测按规范回 interaction_required，保持静默
+  if (c.get("user")!.mustChangePassword) {
+    const next = `/authorize${new URL(c.req.url).search}`;
+    if (c.req.query("prompt") === "none") {
+      return c.redirect(oauthError(parsed.redirectUri, "interaction_required", "需要先修改密码", parsed.state), 303);
+    }
+    return c.redirect(`/password?next=${encodeURIComponent(next)}`, 303);
   }
 
   // 发码 + 303 直跳 client（登录页内联发码走同一函数，见 pages.ts 的 POST /login）
