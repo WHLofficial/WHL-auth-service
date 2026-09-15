@@ -85,6 +85,22 @@ test("发码→烧码→一次性→一账号一队→审计全链", { skip: SKI
   assert.ok(audits.includes("team.bindcode") && audits.includes("team.bind"), `审计应有 bindcode/bind：${audits.join()}`);
 });
 
+test("同码并发竞速：码已被他人烧掉时第二路零写入（invalid_code 且不产生绑定）", { skip: SKIP }, async () => {
+  seedTeam(5602, "绑定测试二队");
+  const c = machineClient();
+  const issue = await (await machinePost(c, "/api/team/bindcode", { tour_team_id: 5602, via: "tour" })).json();
+  assert.equal(issue.ok, true);
+  // 模拟并发竞速：另一账号已抢先烧掉该码
+  H.sqlExec(
+    `UPDATE team_bind_code SET used_by = 7101, used_at = '${new Date().toISOString()}' WHERE code_hash = '${H.sha256Hex(issue.code)}';`,
+  );
+  const late = await machinePost(c, "/api/team/bind", { code: issue.code, account_id: 7102, via: "tour" });
+  assert.equal((await late.json()).error, "invalid_code", "输掉竞速应报 invalid_code");
+  assert.equal(H.sql(`SELECT COUNT(*) AS n FROM team_binding WHERE account_id = 7102;`)[0].n, 0, "不应产生绑定行");
+  assert.equal(H.sql(`SELECT used_by FROM team_bind_code WHERE code_hash = '${H.sha256Hex(issue.code)}';`)[0].used_by, 7101, "码保持被先到者占用");
+  assert.equal(H.sql(`SELECT COUNT(*) AS n FROM audit_log WHERE event = 'team.bind' AND account_id = 7102;`)[0].n, 0, "失败请求不留审计");
+});
+
 test("解绑→not_bound→重绑（via=club 也落到同一张表）", { skip: SKIP }, async () => {
   const c = machineClient();
   const no = await machinePost(c, "/api/team/unbind", { account_id: 7003 });

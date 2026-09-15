@@ -223,24 +223,30 @@ app.post("/api/team/bind", async (c) => {
     .first<{ team_id: number }>();
   if (existing) return c.json({ error: "already_bound", message: "该账号已经绑定了球队，解绑需联系管理员" }, 400);
 
-  // 原子核销：绑定写入、码置已用、审计三句同批提交；绑定复用被 idx_team_binding_account 挡住
+  // 原子核销三句同批：烧码是条件 UPDATE；绑定写入以「码已由本请求烧掉」为条件
+  // （INSERT...SELECT ... WHERE used_by = 本账号）。同码两账号并发竞速时，第二路的
+  // UPDATE 改不到行、INSERT...SELECT 也查不到行 → 整批零写入，按 invalid_code 回应；
+  // 同账号并发撞 UNIQUE(account_id) 时批内异常回滚，按 already_bound 回应。
+  // 审计与业务写入同批：绑定变更必有审计，不出现「已绑定但无审计」。
   try {
-    await c.env.DB.batch([
-      c.env.DB.prepare("INSERT INTO team_binding (account_id, team_id, bound_via, bound_at) VALUES (?, ?, ?, ?)").bind(
-        accountId,
-        row.team_id,
-        via,
-        now,
-      ),
+    const results = await c.env.DB.batch([
       c.env.DB.prepare("UPDATE team_bind_code SET used_by = ?, used_at = ? WHERE id = ? AND used_by IS NULL").bind(
         accountId,
         now,
         row.id,
       ),
       c.env.DB.prepare(
+        `INSERT INTO team_binding (account_id, team_id, bound_via, bound_at)
+         SELECT ?, team_id, ?, ? FROM team_bind_code WHERE id = ? AND used_by = ?`,
+      ).bind(accountId, via, now, row.id, accountId),
+      c.env.DB.prepare(
         "INSERT INTO audit_log (account_id, event, detail, ip, created_at) VALUES (?, 'team.bind', ?, ?, ?)",
       ).bind(accountId, JSON.stringify({ team_id: row.team_id, via }), clientIp(c), now),
     ]);
+    if ((results[1].meta.changes ?? 0) !== 1) {
+      // 条件未满足（码已被并发请求烧掉）：本批什么都没写
+      return c.json({ error: "invalid_code", message: "认证码无效或已过期" }, 400);
+    }
   } catch {
     // 并发撞 UNIQUE(account_id)（同账号两路并发烧码）：按业务冲突回应
     return c.json({ error: "already_bound", message: "该账号已经绑定了球队，解绑需联系管理员" }, 400);
