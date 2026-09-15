@@ -1,11 +1,15 @@
-// 机器端点（P0-8）：积分插件 ↔ auth 的 QQ 绑定通道，HMAC 验签、无 cookie。
-// 插件侧契约（handlers/sync.py）：POST /api/bind/claim {code, qq_id} → 200 {ok, displayName}，
-// 业务错误 400 {error, message}（invalid_code / qq_bound / user_bound / not_bound），验签失败 401。
+// 机器端点（P0-8 / 增量 7）：无 cookie 的 HMAC 通道。
+// QQ 绑定（积分插件 ↔ auth）：POST /api/bind/claim {code, qq_id} → 200 {ok, displayName}；
+//   POST /api/identity/unbind {qq_id}。业务错误 400 {error, message}
+//   （invalid_code / qq_bound / user_bound / not_bound），验签失败 401。
+// 球队绑定（增量 7，tour/club 双入口）：绑定关系唯一真源在本库，双方经只读 AUTH_DB 派生——
+//   /api/team/bindcode 发码、/api/team/bind 烧码（写绑定+烧码+审计同 batch，杜绝撕裂写）、
+//   /api/team/unbind 解绑、/api/team/register 目录 upsert、/api/team/link 俱乐部关联。
 // 审计行与业务写入同一 batch（同库隐式事务）：绑定变更必有审计，不出现「已绑定但无审计」。
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { AppEnv } from "../env";
-import { sha256Hex } from "../lib/crypto";
+import { sha256Hex, generateCode } from "../lib/crypto";
 import { verifyBindSignature } from "../lib/hmac";
 import { rateLimit } from "../lib/ratelimit";
 import { clientIp, nowIso } from "../lib/util";
@@ -20,29 +24,53 @@ async function displayNameOf(c: { env: AppEnv["Bindings"] }, accountId: number):
 }
 
 // 纵深防御（TEST_REPORT L-2）：HMAC 已把门，限流只用于挡签名密钥泄漏/插件失控后的高速滥用。
-// 键按 CF-Connecting-IP（CF 边缘注入、外部不可伪造），两端点共用一条 300/15min 的桶；
+// 键按 CF-Connecting-IP（CF 边缘注入、外部不可伪造），所有机器端点共用一条 300/15min 的桶；
 // 配额宽松是有意的——scripts/smoke-bind.mjs 连跑几轮不该被自己的限流卡住。
 async function machineAllowed(c: Context<AppEnv>): Promise<boolean> {
   return rateLimit(c.env, `machine:${clientIp(c)}`, 300, 900);
 }
 
-app.post("/api/bind/claim", async (c) => {
-  if (!(await machineAllowed(c))) return c.json({ error: "rate_limited", message: "请求太频繁，请稍后再试" }, 429);
+// 机器端点共用门（限流 → 验签 → 取 raw body）：通过返回 raw，否则返回现成错误 Response。
+// 契约与竞猜系统 verifyPluginRequest 逐字一致：X-Sign = HMAC-SHA256(secret, "POST|path|ts|raw")。
+async function machineGate(c: Context<AppEnv>): Promise<{ raw: string } | { err: Response }> {
+  if (!(await machineAllowed(c))) {
+    return { err: c.json({ error: "rate_limited", message: "请求太频繁，请稍后再试" }, 429) };
+  }
   const secret = c.env.BIND_SECRET ?? "";
-  if (!secret) return c.json({ error: "server_error", message: "服务端未配置 BIND_SECRET" }, 500);
+  if (!secret) return { err: c.json({ error: "server_error", message: "服务端未配置 BIND_SECRET" }, 500) };
   const raw = await c.req.text();
   const pathWithQuery = new URL(c.req.url).pathname + new URL(c.req.url).search;
   if (!(await verifyBindSignature(secret, "POST", pathWithQuery, raw, c.req.header("X-Timestamp"), c.req.header("X-Sign")))) {
-    return c.json({ error: "bad sign" }, 401);
+    return { err: c.json({ error: "bad sign" }, 401) };
   }
-  let body: { code?: unknown; qq_id?: unknown };
+  return { raw };
+}
+
+function parseJson(raw: string): Record<string, unknown> | null {
   try {
-    body = JSON.parse(raw);
+    const v: unknown = JSON.parse(raw);
+    if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
+    return v as Record<string, unknown>;
   } catch {
-    return c.json({ error: "bad body", message: "请求体不是合法 JSON" }, 400);
+    return null;
   }
-  const code = typeof body.code === "string" ? body.code.trim() : "";
-  const qq = typeof body.qq_id === "string" ? body.qq_id.trim() : "";
+}
+
+const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+const int = (v: unknown) => {
+  const n = Number(v);
+  return Number.isInteger(n) ? n : null;
+};
+
+// ---------- QQ 绑定（P0-8，TECH_DESIGN §7） ----------
+
+app.post("/api/bind/claim", async (c) => {
+  const gate = await machineGate(c);
+  if ("err" in gate) return gate.err;
+  const body = parseJson(gate.raw);
+  if (!body) return c.json({ error: "bad body", message: "请求体不是合法 JSON" }, 400);
+  const code = str(body.code);
+  const qq = str(body.qq_id);
   if (!code || !qq) return c.json({ error: "bad body", message: "缺少 code 或 qq_id" }, 400);
   // QQ 号纯数字（插件取消息发送者 id，本来就是数字串）；这里收紧格式，防脏数据进 identity
   if (!/^\d{5,20}$/.test(qq)) return c.json({ error: "bad body", message: "qq_id 格式不对" }, 400);
@@ -91,21 +119,11 @@ app.post("/api/bind/claim", async (c) => {
 });
 
 app.post("/api/identity/unbind", async (c) => {
-  if (!(await machineAllowed(c))) return c.json({ error: "rate_limited", message: "请求太频繁，请稍后再试" }, 429);
-  const secret = c.env.BIND_SECRET ?? "";
-  if (!secret) return c.json({ error: "server_error", message: "服务端未配置 BIND_SECRET" }, 500);
-  const raw = await c.req.text();
-  const pathWithQuery = new URL(c.req.url).pathname + new URL(c.req.url).search;
-  if (!(await verifyBindSignature(secret, "POST", pathWithQuery, raw, c.req.header("X-Timestamp"), c.req.header("X-Sign")))) {
-    return c.json({ error: "bad sign" }, 401);
-  }
-  let body: { qq_id?: unknown };
-  try {
-    body = JSON.parse(raw);
-  } catch {
-    return c.json({ error: "bad body", message: "请求体不是合法 JSON" }, 400);
-  }
-  const qq = typeof body.qq_id === "string" ? body.qq_id.trim() : "";
+  const gate = await machineGate(c);
+  if ("err" in gate) return gate.err;
+  const body = parseJson(gate.raw);
+  if (!body) return c.json({ error: "bad body", message: "请求体不是合法 JSON" }, 400);
+  const qq = str(body.qq_id);
   if (!/^\d{5,20}$/.test(qq)) return c.json({ error: "bad body", message: "缺少 qq_id 或格式不对" }, 400);
 
   const row = await c.env.DB.prepare(
@@ -123,6 +141,191 @@ app.post("/api/identity/unbind", async (c) => {
     ).bind(row.account_id, JSON.stringify({ qq }), clientIp(c), now),
   ]);
   return c.json({ ok: true, displayName: (await displayNameOf(c, row.account_id)) ?? "" });
+});
+
+// ---------- 球队绑定（增量 7：tour/club 双入口，真源在本库） ----------
+
+const VIAS = new Set(["tour", "club"]);
+
+// 按 team_id / tour_team_id / club_id 三选一定位目录行（调用方按自己系统选键）。
+// 参数不合法或目录无此队都返回现成错误 Response，命中返回 { team }。
+async function resolveTeam(
+  c: Context<AppEnv>,
+  body: Record<string, unknown>,
+): Promise<{ team: { id: number } } | { err: Response }> {
+  const teamId = int(body.team_id);
+  const tourTeamId = int(body.tour_team_id);
+  const clubId = int(body.club_id);
+  const given = [teamId !== null, tourTeamId !== null, clubId !== null].filter(Boolean).length;
+  if (given !== 1) {
+    return { err: c.json({ error: "bad body", message: "team_id / tour_team_id / club_id 恰好给一个" }, 400) };
+  }
+  const [col, val] = teamId !== null ? ["id", teamId] : tourTeamId !== null ? ["tour_team_id", tourTeamId] : ["club_id", clubId];
+  const row = await c.env.DB.prepare(`SELECT id FROM team WHERE ${col} = ?`).bind(val).first<{ id: number }>();
+  if (!row) {
+    return { err: c.json({ error: "team_not_found", message: "球队目录没有这支队，请先登记（register）或关联（link）" }, 400) };
+  }
+  return { team: row };
+}
+
+app.post("/api/team/bindcode", async (c) => {
+  const gate = await machineGate(c);
+  if ("err" in gate) return gate.err;
+  const body = parseJson(gate.raw);
+  if (!body) return c.json({ error: "bad body", message: "请求体不是合法 JSON" }, 400);
+  const via = str(body.via);
+  if (!VIAS.has(via)) return c.json({ error: "bad body", message: "via 必须是 tour 或 club" }, 400);
+  const team = await resolveTeam(c, body);
+  if ("err" in team) return team.err;
+
+  const ttl = body.ttl_hours === undefined ? 24 : int(body.ttl_hours);
+  if (ttl === null || ttl < 1 || ttl > 720) {
+    return c.json({ error: "bad body", message: "ttl_hours 须在 1–720 之间（缺省 24）" }, 400);
+  }
+  const now = nowIso();
+  const expiresAt = new Date(Date.now() + ttl * 3600_000).toISOString();
+  const code = generateCode(8);
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      "INSERT INTO team_bind_code (team_id, code_hash, via, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind(team.team.id, await sha256Hex(code), via, expiresAt, now),
+    c.env.DB.prepare(
+      "INSERT INTO audit_log (account_id, event, detail, ip, created_at) VALUES (NULL, 'team.bindcode', ?, ?, ?)",
+    ).bind(JSON.stringify({ team_id: team.team.id, via, expires_at: expiresAt }), clientIp(c), now),
+  ]);
+  // 明码只在本次响应出现一次
+  return c.json({ ok: true, code, expires_at: expiresAt });
+});
+
+app.post("/api/team/bind", async (c) => {
+  const gate = await machineGate(c);
+  if ("err" in gate) return gate.err;
+  const body = parseJson(gate.raw);
+  if (!body) return c.json({ error: "bad body", message: "请求体不是合法 JSON" }, 400);
+  const via = str(body.via);
+  if (!VIAS.has(via)) return c.json({ error: "bad body", message: "via 必须是 tour 或 club" }, 400);
+  const accountId = int(body.account_id);
+  if (accountId === null || accountId < 1) return c.json({ error: "bad body", message: "account_id 不合法" }, 400);
+  const code = str(body.code).toUpperCase();
+  if (code.length !== 8) return c.json({ error: "bad body", message: "code 应为 8 位字母数字" }, 400);
+
+  const now = nowIso();
+  const row = await c.env.DB.prepare(
+    "SELECT id, team_id FROM team_bind_code WHERE code_hash = ? AND used_by IS NULL AND (expires_at IS NULL OR expires_at > ?)",
+  )
+    .bind(await sha256Hex(code), now)
+    .first<{ id: number; team_id: number }>();
+  if (!row) return c.json({ error: "invalid_code", message: "认证码无效或已过期" }, 400);
+
+  // 一账号一队先查再烧：查不出已绑时不烧码，提示更友好（与两侧现行 /bind 口径一致）
+  const existing = await c.env.DB.prepare("SELECT team_id FROM team_binding WHERE account_id = ?")
+    .bind(accountId)
+    .first<{ team_id: number }>();
+  if (existing) return c.json({ error: "already_bound", message: "该账号已经绑定了球队，解绑需联系管理员" }, 400);
+
+  // 原子核销：绑定写入、码置已用、审计三句同批提交；绑定复用被 idx_team_binding_account 挡住
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare("INSERT INTO team_binding (account_id, team_id, bound_via, bound_at) VALUES (?, ?, ?, ?)").bind(
+        accountId,
+        row.team_id,
+        via,
+        now,
+      ),
+      c.env.DB.prepare("UPDATE team_bind_code SET used_by = ?, used_at = ? WHERE id = ? AND used_by IS NULL").bind(
+        accountId,
+        now,
+        row.id,
+      ),
+      c.env.DB.prepare(
+        "INSERT INTO audit_log (account_id, event, detail, ip, created_at) VALUES (?, 'team.bind', ?, ?, ?)",
+      ).bind(accountId, JSON.stringify({ team_id: row.team_id, via }), clientIp(c), now),
+    ]);
+  } catch {
+    // 并发撞 UNIQUE(account_id)（同账号两路并发烧码）：按业务冲突回应
+    return c.json({ error: "already_bound", message: "该账号已经绑定了球队，解绑需联系管理员" }, 400);
+  }
+  return c.json({ ok: true, teamId: row.team_id });
+});
+
+app.post("/api/team/unbind", async (c) => {
+  const gate = await machineGate(c);
+  if ("err" in gate) return gate.err;
+  const body = parseJson(gate.raw);
+  if (!body) return c.json({ error: "bad body", message: "请求体不是合法 JSON" }, 400);
+  const accountId = int(body.account_id);
+  if (accountId === null || accountId < 1) return c.json({ error: "bad body", message: "account_id 不合法" }, 400);
+
+  const row = await c.env.DB.prepare("SELECT team_id FROM team_binding WHERE account_id = ?")
+    .bind(accountId)
+    .first<{ team_id: number }>();
+  if (!row) return c.json({ error: "not_bound", message: "该账号未绑定球队" }, 400);
+
+  const now = nowIso();
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM team_binding WHERE account_id = ?").bind(accountId),
+    c.env.DB.prepare(
+      "INSERT INTO audit_log (account_id, event, detail, ip, created_at) VALUES (?, 'team.unbind', ?, ?, ?)",
+    ).bind(accountId, JSON.stringify({ team_id: row.team_id }), clientIp(c), now),
+  ]);
+  return c.json({ ok: true, teamId: row.team_id });
+});
+
+// 目录登记：tour 建队后调（只带 tour_team_id+name），或迁移脚本一次性建全量目录。
+// club_id 冲突（别的队已关联该俱乐部）按业务冲突回 club_taken。
+app.post("/api/team/register", async (c) => {
+  const gate = await machineGate(c);
+  if ("err" in gate) return gate.err;
+  const body = parseJson(gate.raw);
+  if (!body) return c.json({ error: "bad body", message: "请求体不是合法 JSON" }, 400);
+  const tourTeamId = int(body.tour_team_id);
+  const name = str(body.name);
+  const clubId = body.club_id === undefined || body.club_id === null ? null : int(body.club_id);
+  if (tourTeamId === null || tourTeamId < 1 || !name || name.length > 100) {
+    return c.json({ error: "bad body", message: "tour_team_id 与 name（≤100 字）必填" }, 400);
+  }
+  if (clubId !== null && clubId < 1) return c.json({ error: "bad body", message: "club_id 不合法" }, 400);
+
+  const now = nowIso();
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO team (tour_team_id, club_id, name, created_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(tour_team_id) DO UPDATE SET name = excluded.name, club_id = COALESCE(excluded.club_id, team.club_id)`,
+    ).bind(tourTeamId, clubId, name, now).run();
+  } catch {
+    return c.json({ error: "club_taken", message: "该俱乐部已关联其他球队" }, 400);
+  }
+  const row = await c.env.DB.prepare("SELECT id FROM team WHERE tour_team_id = ?").bind(tourTeamId).first<{ id: number }>();
+  await c.env.DB.prepare(
+    "INSERT INTO audit_log (account_id, event, detail, ip, created_at) VALUES (NULL, 'team.register', ?, ?, ?)",
+  ).bind(JSON.stringify({ tour_team_id: tourTeamId, club_id: clubId, name }), clientIp(c), now);
+  return c.json({ ok: true, teamId: row?.id ?? null });
+});
+
+// 俱乐部关联：迁移脚本按名字匹配建目录后，人工修正/改绑走这里
+app.post("/api/team/link", async (c) => {
+  const gate = await machineGate(c);
+  if ("err" in gate) return gate.err;
+  const body = parseJson(gate.raw);
+  if (!body) return c.json({ error: "bad body", message: "请求体不是合法 JSON" }, 400);
+  const tourTeamId = int(body.tour_team_id);
+  const clubId = int(body.club_id);
+  if (tourTeamId === null || tourTeamId < 1 || clubId === null || clubId < 1) {
+    return c.json({ error: "bad body", message: "tour_team_id 与 club_id 必填" }, 400);
+  }
+
+  try {
+    const res = await c.env.DB.prepare("UPDATE team SET club_id = ? WHERE tour_team_id = ?").bind(clubId, tourTeamId).run();
+    if ((res.meta.changes ?? 0) !== 1) {
+      return c.json({ error: "team_not_found", message: "球队目录没有这支队，请先 register" }, 400);
+    }
+  } catch {
+    return c.json({ error: "club_taken", message: "该俱乐部已关联其他球队" }, 400);
+  }
+  await c.env.DB.prepare(
+    "INSERT INTO audit_log (account_id, event, detail, ip, created_at) VALUES (NULL, 'team.link', ?, ?, ?)",
+  ).bind(JSON.stringify({ tour_team_id: tourTeamId, club_id: clubId }), clientIp(c), nowIso());
+  return c.json({ ok: true });
 });
 
 export default app;
