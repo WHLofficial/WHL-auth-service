@@ -9,6 +9,7 @@ import { rateLimit, resetRateLimit } from "../lib/ratelimit";
 import { SESSION_COOKIE, createSession, destroySession, revokeSessionAndNotify } from "../lib/session";
 import { clientIp } from "../lib/util";
 import { bindPage, homePage, loginPage, passwordPage, registerPage } from "../web/pages";
+import { issueCode, parseAuthorize, runDetached } from "./oidc";
 
 const app = new Hono<AppEnv>();
 
@@ -78,6 +79,8 @@ async function refundSignupCode(c: Context<AppEnv>, code: string): Promise<void>
 }
 
 // 语义与 tour POST /api/auth/login 一致：IP 10/900s + 同 IP 同账号 5/900s + 跨 IP 账号 50/900s 三重限流
+// 登录提速：昵称限流与账号查询并行（读操作无副作用）；成功路径的清限流+audit 挪 waitUntil 后台；
+// next 是 /authorize 时内联发码直跳 RP 回调（省一整跳，见下方 issueAuthorize）
 app.post("/login", async (c) => {
   const ip = clientIp(c);
   if (!(await rateLimit(c.env, `login-ip:${ip}`, 10, 900))) {
@@ -103,40 +106,65 @@ app.post("/login", async (c) => {
     await audit(c, "login.fail", { detail: { name: name.slice(0, 64) } });
     return fail(401, "昵称或密码不正确");
   }
-  // 同 IP 同账号 5/900：只锁攻击者自己这条路，受害者换 IP 用正确密码不受影响（F-C）
-  if (!(await rateLimit(c.env, `login-name:${ip}:${name}`, 5, 900))) {
+  // 同 IP 同账号 5/900：只锁攻击者自己这条路，受害者换 IP 用正确密码不受影响（F-C）。
+  // 与账号查询并行（原串行两次 D1 往返；限流计数先于验密，口径与串行版一致）
+  const [nameOk, row] = await Promise.all([
+    rateLimit(c.env, `login-name:${ip}:${name}`, 5, 900),
+    c.env.DB.prepare(
+      `SELECT a.id, a.locked, a.must_change_pw, cr.hash AS password_hash
+         FROM account a JOIN credential cr ON cr.account_id = a.id AND cr.type = 'password'
+        WHERE a.name = ?`,
+    )
+      .bind(name)
+      .first<{ id: number; locked: number; must_change_pw: number; password_hash: string }>(),
+  ]);
+  if (!nameOk) {
     await audit(c, "login.rate_limited", { detail: { scope: "ip+name", name } });
     return fail(429, "这个账号尝试太频繁，请 15 分钟后再来");
   }
-  // 账号收口（P0-11）：账号/凭证真源 = auth 库 account/credential（TECH_DESIGN §5.3 终态）
-  const row = await c.env.DB.prepare(
-    `SELECT a.id, a.locked, a.must_change_pw, cr.hash AS password_hash
-       FROM account a JOIN credential cr ON cr.account_id = a.id AND cr.type = 'password'
-      WHERE a.name = ?`,
-  )
-    .bind(name)
-    .first<{ id: number; locked: number; must_change_pw: number; password_hash: string }>();
   const passwordOk = await verifyPassword(formValue(form, "password"), row?.password_hash ?? (await dummyPasswordHash()));
   if (!row || !passwordOk) {
     await audit(c, "login.fail", { detail: { name } });
     // 跨 IP 的账号桶只在失败路径计数（阈值高于单 IP 桶，兜分布式慢速爆破）；密码正确时
-    // 下面直接清零，所以攻击者累计失败也锁不住受害者（F-C）
+    // 下面后台清零，所以攻击者累计失败也锁不住受害者（F-C）
     if (!(await rateLimit(c.env, `login-acct:${name}`, 50, 900))) {
       await audit(c, "login.rate_limited", { detail: { scope: "acct", name } });
       return fail(429, "这个账号尝试太频繁，请 15 分钟后再来");
     }
     return fail(401, "昵称或密码不正确");
   }
-  await resetRateLimit(c.env, `login-acct:${name}`);
-  await audit(c, "login.ok", { accountId: row.id });
-  await createSession(c, row.id);
+  const token = await createSession(c, row.id);
+  // 清账号限流 + audit login.ok 都不挡响应：waitUntil 后台（测试无 executionCtx 就地 await）
+  await runDetached(
+    c,
+    (async () => {
+      await resetRateLimit(c.env, `login-acct:${name}`);
+      await audit(c, "login.ok", { accountId: row.id });
+    })(),
+  );
   if (row.must_change_pw === 1) {
     // 带 next 进来的（如 OIDC authorize 跳转）把链路保住：改完密码直接回原目标
     const nx = safeNext(form.next);
     return c.redirect(nx === "/" ? "/password" : `/password?next=${encodeURIComponent(nx)}`, 303);
   }
-  return c.redirect(safeNext(form.next), 303);
+  return c.redirect(await resolvePostLoginTarget(c, form.next, row.id, token), 303);
 });
+
+/** 登录成功后的去向：next 是合法 /authorize 请求就内联发码直跳 client 回调（省掉重新走
+ *  GET /authorize 整跳），校验不过回退老链路让 /authorize 出标准错误；普通 next 原样去。 */
+async function resolvePostLoginTarget(
+  c: Context<AppEnv>,
+  rawNext: unknown,
+  accountId: number,
+  sessionToken: string,
+): Promise<string> {
+  const nx = safeNext(rawNext);
+  if (!nx.startsWith("/authorize?")) return nx;
+  const parsed = await parseAuthorize(c, new URL(nx, new URL(c.req.url).origin));
+  if (parsed.kind !== "ok") return nx;
+  // 内联发码不走 authz 限流：能到这里刚过登录三重限流（IP 10/900 严于 authz 60/900），无新增面
+  return issueCode(c, { id: accountId }, parsed, await sha256Hex(sessionToken));
+}
 
 app.get("/register", async (c) => {
   if (c.get("user")) return c.redirect("/", 303);

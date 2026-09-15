@@ -23,6 +23,8 @@ type AppRow = {
   post_logout_redirect_uris: string;
 };
 
+// app 表不做 isolate 缓存：测试与将来的运维脚本都可能直接改 app 行（redirect_uri 白名单），
+// 缓存 60s 会让改白名单后 authorize 短暂全挂（本轮测试实测）；一次 D1 点查成本可接受。
 async function loadApp(c: Context<AppEnv>, clientId: string): Promise<AppRow | null> {
   return c.env.DB.prepare("SELECT client_id, redirect_uris, post_logout_redirect_uris FROM app WHERE client_id = ?")
     .bind(clientId)
@@ -104,35 +106,132 @@ function oauthError(redirectUri: string, error: string, description: string, sta
   return u.toString();
 }
 
-app.get("/authorize", async (c) => {
-  if (!(await rateLimit(c.env, `authz:${clientIp(c)}`, 60, 900))) {
-    return c.html(oidcErrorPage("请求太频繁", "操作太密集，请 15 分钟后再试。"), 429);
-  }
-  const iss = new URL(c.req.url).origin;
-  const clientId = c.req.query("client_id") ?? "";
-  const redirectUri = c.req.query("redirect_uri") ?? "";
+/** parseAuthorize 的结果三分支：
+ *  - invalid_client：client/redirect_uri 对不上，连跳转目标都没验证过，只能渲染错误页（防开放跳转）；
+ *  - rp_error：参数问题，可安全跳回 client 带 error 参数；
+ *  - ok：全部校验通过，可以发码。 */
+type ParsedAuthorize =
+  | { kind: "invalid_client" }
+  | { kind: "rp_error"; redirectUri: string; error: string; description: string; state?: string }
+  | {
+      kind: "ok";
+      clientId: string;
+      redirectUri: string;
+      state?: string;
+      scopes: string[];
+      challenge: string;
+      nonce: string | null;
+    };
+
+/** 校验 /authorize 的全部请求参数（GET /authorize 与 POST /login 内联发码共用，口径一字不差）。
+ *  url 传含 query 的完整 authorize 地址；query 直接取自该 URL。 */
+export async function parseAuthorize(c: Context<AppEnv>, authorizeUrl: URL): Promise<ParsedAuthorize> {
+  const clientId = authorizeUrl.searchParams.get("client_id") ?? "";
+  const redirectUri = authorizeUrl.searchParams.get("redirect_uri") ?? "";
   const app_ = clientId && redirectUri ? await loadApp(c, clientId) : null;
   // client 与 redirect_uri 逐字精确匹配；匹配不上就渲染错误页而不是跳转——
   // 跳转目标本身还没被验证，开放跳转就是这么来的
   if (!app_ || redirectUri.includes("#") || !parseUris(app_.redirect_uris).includes(redirectUri)) {
+    return { kind: "invalid_client" };
+  }
+
+  const state = authorizeUrl.searchParams.get("state") ?? undefined;
+  const fail = (error: string, description: string) => ({
+    kind: "rp_error" as const,
+    redirectUri,
+    error,
+    description,
+    state,
+  });
+
+  if (authorizeUrl.searchParams.get("response_type") !== "code") return fail("unsupported_response_type", "只支持 code 流程");
+  const scopes = (authorizeUrl.searchParams.get("scope") ?? "").split(" ").filter(Boolean);
+  if (!scopes.includes("openid")) return fail("invalid_scope", "scope 需要包含 openid");
+  if (scopes.some((s) => !ALLOWED_SCOPES.includes(s))) return fail("invalid_scope", "scope 超出允许范围");
+  const challenge = authorizeUrl.searchParams.get("code_challenge") ?? "";
+  // S256 的 challenge 恒为 43 位 base64url；PKCE 强制（TECH_DESIGN §8.3）
+  if (!/^[A-Za-z0-9\-_]{43}$/.test(challenge) || authorizeUrl.searchParams.get("code_challenge_method") !== "S256") {
+    return fail("invalid_request", "必须携带 PKCE code_challenge（method=S256）");
+  }
+  return {
+    kind: "ok",
+    clientId,
+    redirectUri,
+    state,
+    scopes,
+    challenge,
+    nonce: authorizeUrl.searchParams.get("nonce") || null,
+  };
+}
+
+/** 发授权码：机会性清理过期码（后台）+ 写新码 + 构造回跳 client 的 URL（RFC 9207 带 iss）。
+ *  sessionHash 由调用方提供（GET /authorize 用 cookie、POST /login 用刚建的令牌），同一套码表。 */
+export async function issueCode(
+  c: Context<AppEnv>,
+  user: { id: number },
+  parsed: Extract<ParsedAuthorize, { kind: "ok" }>,
+  sessionHash: string,
+): Promise<string> {
+  const code = randomToken(32);
+  const iss = new URL(c.req.url).origin;
+  // 机会性清理过期授权码（行本体不自动消失，控制表体积；≤50 用户量级下成本可忽略）。
+  // waitUntil 后台跑不挡发码；app.request 直调（测试）没有 executionCtx 时就地 await。
+  const cleanup = c.env.DB.prepare("DELETE FROM oidc_code WHERE expires_at < ?")
+    .bind(new Date().toISOString())
+    .run();
+  await c.env.DB.prepare(
+    `INSERT INTO oidc_code
+       (code_hash, account_id, client_id, redirect_uri, scope, nonce, code_challenge,
+        code_challenge_method, session_hash, created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'S256', ?, ?, ?)`,
+  )
+    .bind(
+      await sha256Hex(code),
+      user.id,
+      parsed.clientId,
+      parsed.redirectUri,
+      parsed.scopes.join(" "),
+      parsed.nonce,
+      parsed.challenge,
+      sessionHash,
+      new Date().toISOString(),
+      new Date(Date.now() + 60_000).toISOString(),
+    )
+    .run();
+  // 过期码清理：生产 waitUntil 后台、测试就地等待（runDetached 返回值统一可 await）
+  await runDetached(c, cleanup.catch((err) => console.error("过期授权码清理失败：", err)));
+
+  const target = new URL(parsed.redirectUri);
+  target.searchParams.set("code", code);
+  if (parsed.state !== undefined) target.searchParams.set("state", parsed.state);
+  target.searchParams.set("iss", iss); // RFC 9207：client 可自查响应来自哪个授权服务，防混用
+  return target.toString();
+}
+
+/** 有 executionCtx 就 waitUntil 后台跑，没有（测试 app.request 直调）就地 await。
+ *  登录/发码热路径的旁支写操作共用这个小件。 */
+export function runDetached(c: Context<AppEnv>, job: Promise<unknown>): Promise<unknown> {
+  try {
+    c.executionCtx.waitUntil(job);
+    return Promise.resolve(null);
+  } catch {
+    return job;
+  }
+}
+
+app.get("/authorize", async (c) => {
+  if (!(await rateLimit(c.env, `authz:${clientIp(c)}`, 60, 900))) {
+    return c.html(oidcErrorPage("请求太频繁", "操作太密集，请 15 分钟后再试。"), 429);
+  }
+  const parsed = await parseAuthorize(c, new URL(c.req.url));
+  if (parsed.kind === "invalid_client") {
     return c.html(
       oidcErrorPage("无法处理这个登录请求", "发起登录的应用不在接入名单里，或回调地址不对。请联系管理员。"),
       400,
     );
   }
-
-  const state = c.req.query("state");
-  const fail = (error: string, description: string) =>
-    c.redirect(oauthError(redirectUri, error, description, state), 303);
-
-  if (c.req.query("response_type") !== "code") return fail("unsupported_response_type", "只支持 code 流程");
-  const scopes = (c.req.query("scope") ?? "").split(" ").filter(Boolean);
-  if (!scopes.includes("openid")) return fail("invalid_scope", "scope 需要包含 openid");
-  if (scopes.some((s) => !ALLOWED_SCOPES.includes(s))) return fail("invalid_scope", "scope 超出允许范围");
-  const challenge = c.req.query("code_challenge") ?? "";
-  // S256 的 challenge 恒为 43 位 base64url；PKCE 强制（TECH_DESIGN §8.3）
-  if (!/^[A-Za-z0-9\-_]{43}$/.test(challenge) || c.req.query("code_challenge_method") !== "S256") {
-    return fail("invalid_request", "必须携带 PKCE code_challenge（method=S256）");
+  if (parsed.kind === "rp_error") {
+    return c.redirect(oauthError(parsed.redirectUri, parsed.error, parsed.description, parsed.state), 303);
   }
 
   const sessionToken = getCookie(c, SESSION_COOKIE);
@@ -142,34 +241,9 @@ app.get("/authorize", async (c) => {
     return c.redirect(`/login?next=${encodeURIComponent(next)}`, 303);
   }
 
-  const code = randomToken(32);
-  // 机会性清理过期授权码（行本体不自动消失，控制表体积；≤50 用户量级下成本可忽略）
-  await c.env.DB.prepare("DELETE FROM oidc_code WHERE expires_at < ?").bind(new Date().toISOString()).run();
-  await c.env.DB.prepare(
-    `INSERT INTO oidc_code
-       (code_hash, account_id, client_id, redirect_uri, scope, nonce, code_challenge,
-        code_challenge_method, session_hash, created_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'S256', ?, ?, ?)`,
-  )
-    .bind(
-      await sha256Hex(code),
-      c.get("user")!.id,
-      clientId,
-      redirectUri,
-      scopes.join(" "),
-      c.req.query("nonce") || null,
-      challenge,
-      await sha256Hex(sessionToken),
-      new Date().toISOString(),
-      new Date(Date.now() + 60_000).toISOString(),
-    )
-    .run();
-
-  const target = new URL(redirectUri);
-  target.searchParams.set("code", code);
-  if (state !== undefined) target.searchParams.set("state", state);
-  target.searchParams.set("iss", iss); // RFC 9207：client 可自查响应来自哪个授权服务，防混用
-  return c.redirect(target.toString(), 303);
+  // 发码 + 303 直跳 client（登录页内联发码走同一函数，见 pages.ts 的 POST /login）
+  const target = await issueCode(c, c.get("user")!, parsed, await sha256Hex(sessionToken));
+  return c.redirect(target, 303);
 });
 
 // ---------- token 端点（code 换取 + refresh 轮换） ----------
@@ -336,11 +410,12 @@ app.post("/token", async (c) => {
       return oauthJsonError(c, "invalid_grant", "PKCE 校验失败");
     }
     // 会话吊销联动：发码用的登录会话若已登出，code 随之作废。
-    // auth 登录页建的会话有 D1 行可查；tour 旧登录的会话无行，按存活处理（与 getSessionUser 口径一致）
+    // 兼容桥已停写（登录提速），会话只可能来自 auth 登录/注册，D1 必有行——查无行=非法 session_hash，
+    // 按「登录会话已结束」拒绝（过渡期"无行按存活"的口径随 9-21 旧 KV 会话 TTL 归零后收紧）。
     const sess = await c.env.DB.prepare("SELECT revoked_at, expires_at FROM session WHERE token_hash = ?")
       .bind(row.session_hash)
       .first<{ revoked_at: string | null; expires_at: string }>();
-    if (sess && (sess.revoked_at || sess.expires_at <= nowIso()))
+    if (!sess || sess.revoked_at || sess.expires_at <= nowIso())
       return oauthJsonError(c, "invalid_grant", "登录会话已结束，请重新登录");
     const user = await loadAccountUser(c, row.account_id);
     if (!user) return oauthJsonError(c, "invalid_grant", "账号不存在");

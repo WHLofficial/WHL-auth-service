@@ -10,6 +10,14 @@ import type { AppEnv, Role, SessionUser } from "../env";
  */
 export type AccountUser = SessionUser & { email: string | null };
 
+/** user_role 行 → role 投影（loadAccountUser 与 getSessionUser 共用，口径必须一致）：
+ * 全局 superadmin 角色 → 'superadmin'；持有 tour.recorder → 'admin'；否则 'coach'。 */
+export function roleFromRoleRows(rows: { app_id: string | null; role_key: string }[]): Role {
+  if (rows.some((r) => r.app_id === null && r.role_key === "superadmin")) return "superadmin";
+  if (rows.some((r) => r.app_id === "tour" && r.role_key === "recorder")) return "admin";
+  return "coach";
+}
+
 export async function loadAccountUser(c: Context<AppEnv>, accountId: number): Promise<AccountUser | null> {
   const account = await c.env.DB.prepare(
     "SELECT id, name, email, locked, must_change_pw FROM account WHERE id = ?",
@@ -22,14 +30,11 @@ export async function loadAccountUser(c: Context<AppEnv>, accountId: number): Pr
   )
     .bind(accountId)
     .all<{ app_id: string | null; role_key: string }>();
-  let role: Role = "coach";
-  if (roles.results.some((r) => r.app_id === null && r.role_key === "superadmin")) role = "superadmin";
-  else if (roles.results.some((r) => r.app_id === "tour" && r.role_key === "recorder")) role = "admin";
   return {
     id: account.id,
     name: account.name,
     email: account.email,
-    role,
+    role: roleFromRoleRows(roles.results),
     locked: account.locked === 1,
     mustChangePassword: account.must_change_pw === 1,
   };

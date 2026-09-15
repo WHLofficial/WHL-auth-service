@@ -1,7 +1,7 @@
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { Context } from "hono";
 import type { AppEnv, SessionUser } from "../env";
-import { loadAccountUser } from "./accounts";
+import { roleFromRoleRows } from "./accounts";
 import { randomToken, sha256Hex } from "./crypto";
 import { signLogoutToken } from "./oidc";
 import { nowIso } from "./util";
@@ -15,16 +15,14 @@ function cookieDomain(c: Context<AppEnv>): { domain?: string } {
 }
 
 /**
- * 兼容会话桥双写（TECH_DESIGN §5.3）：
- * 1. 共享 KV 写 `sess:{token}`（值形状与 tour 完全一致），tour/guess/club 零改动读取；
- * 2. auth D1 session 表记录 token_hash，供 OIDC 与主动吊销使用。
- * 两处 TTL 一致（7 天，对齐现状）。
+ * 会话创建：只写 auth D1 session 表（token_hash），供 OIDC 与主动吊销使用；TTL 7 天。
+ * 共享 KV 兼容桥（tour 登录时代的 sess:{token} 双写）已停写——四系统 2026-09-14 全量切 OIDC，
+ * guess/club 残留的 KV 兜底读到空即回退 OIDC 静默登录，主链路无感；旧 KV 条目随 7 天 TTL 自然清空。
+ * 少一次 KV 写在登录热路径上（性能整治）。
+ * @returns 明文会话令牌（调用方需要 sessionHash 时直接复用，避免再算一次）
  */
-export async function createSession(c: Context<AppEnv>, userId: number): Promise<void> {
+export async function createSession(c: Context<AppEnv>, userId: number): Promise<string> {
   const token = randomToken();
-  await c.env.SESSION_KV.put(`sess:${token}`, JSON.stringify({ userId }), {
-    expirationTtl: TTL_SECONDS,
-  });
   await c.env.DB.prepare(
     "INSERT INTO session (token_hash, account_id, family_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
   )
@@ -46,28 +44,48 @@ export async function createSession(c: Context<AppEnv>, userId: number): Promise
   });
   // 切换共享域后清掉历史 host-only 同名 cookie，避免新旧两个 whl_session 并存、读取歧义
   if (c.env.COOKIE_DOMAIN) deleteCookie(c, SESSION_COOKIE, { path: "/" });
+  return token;
 }
 
 export async function getSessionUser(c: Context<AppEnv>): Promise<SessionUser | null> {
   const token = getCookie(c, SESSION_COOKIE);
   if (!token) return null;
-  // 账号收口（P0-11，TECH_DESIGN §9.1 ③）：会话只认 auth 库 session 行（auth 登录/注册
-  // 一直双写 D1）。不再读共享 KV——tour 兼容登录页创建的纯 KV 旧会话在这里视为未登录，
-  // 随 7 天 TTL 自然退役；KV 键保留只为旧 client 兼容模式与 R2 回滚，收口后随 P0-13 停写移除。
-  const sess = await c.env.DB.prepare(
-    "SELECT account_id, revoked_at, expires_at FROM session WHERE token_hash = ?",
+  // 账号收口（P0-11，TECH_DESIGN §9.1 ③）+ 登录提速：会话与账号一条 JOIN 拿齐
+  // （原来会话、账号、角色 3 次串行 D1 往返，全站每个请求都跑）。过期判定仍必须在服务端做：
+  // cookie 的 Max-Age 只在浏览器侧生效，被复制的 token 不受它约束。
+  const row = await c.env.DB.prepare(
+    `SELECT a.id, a.name, a.locked, a.must_change_pw, s.revoked_at, s.expires_at
+       FROM session s JOIN account a ON a.id = s.account_id
+      WHERE s.token_hash = ?`,
   )
     .bind(await sha256Hex(token))
-    .first<{ account_id: number; revoked_at: string | null; expires_at: string }>();
-  // 过期判定必须在服务端做：cookie 的 Max-Age 只在浏览器侧生效，被复制的 token 不受它约束
-  if (!sess || sess.revoked_at || sess.expires_at <= nowIso()) return null;
-  return loadAccountUser(c, sess.account_id);
+    .first<{
+      id: number;
+      name: string;
+      locked: number;
+      must_change_pw: number;
+      revoked_at: string | null;
+      expires_at: string;
+    }>();
+  if (!row || row.revoked_at || row.expires_at <= nowIso()) return null;
+  const roles = await c.env.DB.prepare(
+    "SELECT r.app_id AS app_id, r.key AS role_key FROM user_role ur JOIN role r ON r.id = ur.role_id WHERE ur.account_id = ?",
+  )
+    .bind(row.id)
+    .all<{ app_id: string | null; role_key: string }>();
+  return {
+    id: row.id,
+    name: row.name,
+    role: roleFromRoleRows(roles.results),
+    locked: row.locked === 1,
+    mustChangePassword: row.must_change_pw === 1,
+  };
 }
 
 export async function destroySession(c: Context<AppEnv>): Promise<void> {
   const token = getCookie(c, SESSION_COOKIE);
   if (token) {
-    await c.env.SESSION_KV.delete(`sess:${token}`);
+    // KV 兼容桥已停写（见 createSession），这里也不再删 KV
     await c.env.DB.prepare("UPDATE session SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL")
       .bind(nowIso(), await sha256Hex(token))
       .run();
@@ -78,7 +96,7 @@ export async function destroySession(c: Context<AppEnv>): Promise<void> {
   if (c.env.COOKIE_DOMAIN) deleteCookie(c, SESSION_COOKIE, { path: "/" });
 }
 
-/** 登出/改密联动：吊销该兼容会话签发的全部 OIDC refresh（TECH_DESIGN §3 登出语义）。
+/** 登出/改密联动：吊销该会话签发的全部 OIDC refresh（TECH_DESIGN §3 登出语义）。
  *  所有销毁会话的入口（POST /logout、GET /logout、改密轮换）都必须调用 */
 export async function revokeSessionTokens(c: Context<AppEnv>, sessionHash: string): Promise<void> {
   await c.env.DB.prepare("UPDATE oidc_refresh SET revoked_at = ? WHERE session_hash = ? AND revoked_at IS NULL")

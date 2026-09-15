@@ -13,7 +13,7 @@ export type AuditEvent =
   | "oidc.code_replay"
   | "oidc.refresh_reuse";
 
-/** 关键事件入 audit_log（auth D1）。过渡期 account_id = tour user.id 同值 */
+/** 关键事件入 audit_log（auth D1）。account_id = auth account.id（收口时与 tour user.id 同值迁移） */
 export async function audit(
   c: Context<AppEnv>,
   event: AuditEvent,

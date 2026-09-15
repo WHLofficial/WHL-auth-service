@@ -10,7 +10,7 @@ import { errorPage } from "./web/pages";
 
 const app = new Hono<AppEnv>();
 
-// 所有页面共用：读兼容会话挂 user（未登录为 null）
+// 所有页面共用：读会话挂 user（未登录为 null）
 app.use(async (c, next) => {
   c.set("user", await getSessionUser(c));
   await next();

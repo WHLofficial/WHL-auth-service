@@ -288,20 +288,29 @@ test("静默 SSO：未登录访问 /authorize 保留完整查询串，登录后�
     assert.equal(l.pathname, "/login");
     assert.equal(l.searchParams.get("next"), authorizeUrl, "next 应原样保留 state/nonce/challenge");
 
-    // 登录时带上 next → 落到 /authorize 原请求
+    // 登录时带上 next → 内联发码直跳 client 回调（省掉重走 /authorize 整跳）
     const r = await H.signIn(anon, u.name, PW, authorizeUrl);
     assert.equal(r.status, 303);
-    const back = loc(r.res);
-    assert.equal(back.pathname, "/authorize");
-    assert.equal(back.search, new URL(authorizeUrl, H.BASE).search);
-
-    const got = await anon.get(back.pathname + back.search);
-    assert.equal(got.status, 303);
-    const target = loc(got);
-    assert.equal(target.origin, bc.origin);
-    assert.ok(target.searchParams.get("code"), "登录后应直接取到授权码");
+    const target = loc(r.res);
+    assert.equal(target.origin, bc.origin, "登录后应直跳回调地址");
+    assert.ok(target.searchParams.get("code"), "应直接拿到授权码");
     assert.equal(target.searchParams.get("state"), "st-sso");
+    assert.equal(target.searchParams.get("iss"), ORIGIN, "应带 RFC 9207 iss");
   } finally {
     await bc.close();
   }
+});
+
+test("内联发码回退：next 的 redirect_uri 非法时回退老链路，由 /authorize 出标准错误", async () => {
+  const u = await freshUser("inlinefb");
+  const { challenge } = H.pkce();
+  const bad = H.authorizeQuery({ clientId: H.TEST_APP, redirectUri: "https://evil.example/cb", challenge });
+  const anon = new Client(H.BASE);
+  const r = await H.signIn(anon, u.name, PW, bad);
+  assert.equal(r.status, 303);
+  const back = loc(r.res);
+  assert.equal(back.pathname, "/authorize", "校验不过应回退 /authorize，不得直跳任意地址");
+  assert.equal(back.search, new URL(bad, H.BASE).search);
+  const err = await anon.get(back.pathname + back.search);
+  assert.equal(err.status, 400, "非法回调地址应由 /authorize 渲染标准错误页");
 });
