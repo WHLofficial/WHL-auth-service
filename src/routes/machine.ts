@@ -294,17 +294,20 @@ app.post("/api/team/register", async (c) => {
 
   const now = nowIso();
   try {
-    await c.env.DB.prepare(
-      `INSERT INTO team (tour_team_id, club_id, name, created_at) VALUES (?, ?, ?, ?)
-       ON CONFLICT(tour_team_id) DO UPDATE SET name = excluded.name, club_id = COALESCE(excluded.club_id, team.club_id)`,
-    ).bind(tourTeamId, clubId, name, now).run();
+    // 登记与审计同批（同库隐式事务）：目录变更必有审计
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        `INSERT INTO team (tour_team_id, club_id, name, created_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(tour_team_id) DO UPDATE SET name = excluded.name, club_id = COALESCE(excluded.club_id, team.club_id)`,
+      ).bind(tourTeamId, clubId, name, now),
+      c.env.DB.prepare(
+        "INSERT INTO audit_log (account_id, event, detail, ip, created_at) VALUES (NULL, 'team.register', ?, ?, ?)",
+      ).bind(JSON.stringify({ tour_team_id: tourTeamId, club_id: clubId, name }), clientIp(c), now),
+    ]);
   } catch {
     return c.json({ error: "club_taken", message: "该俱乐部已关联其他球队" }, 400);
   }
   const row = await c.env.DB.prepare("SELECT id FROM team WHERE tour_team_id = ?").bind(tourTeamId).first<{ id: number }>();
-  await c.env.DB.prepare(
-    "INSERT INTO audit_log (account_id, event, detail, ip, created_at) VALUES (NULL, 'team.register', ?, ?, ?)",
-  ).bind(JSON.stringify({ tour_team_id: tourTeamId, club_id: clubId, name }), clientIp(c), now);
   return c.json({ ok: true, teamId: row?.id ?? null });
 });
 
@@ -321,16 +324,19 @@ app.post("/api/team/link", async (c) => {
   }
 
   try {
-    const res = await c.env.DB.prepare("UPDATE team SET club_id = ? WHERE tour_team_id = ?").bind(clubId, tourTeamId).run();
-    if ((res.meta.changes ?? 0) !== 1) {
+    // 关联与审计同批（同库隐式事务）：目录变更必有审计
+    const results = await c.env.DB.batch([
+      c.env.DB.prepare("UPDATE team SET club_id = ? WHERE tour_team_id = ?").bind(clubId, tourTeamId),
+      c.env.DB.prepare(
+        "INSERT INTO audit_log (account_id, event, detail, ip, created_at) VALUES (NULL, 'team.link', ?, ?, ?)",
+      ).bind(JSON.stringify({ tour_team_id: tourTeamId, club_id: clubId }), clientIp(c), nowIso()),
+    ]);
+    if ((results[0].meta.changes ?? 0) !== 1) {
       return c.json({ error: "team_not_found", message: "球队目录没有这支队，请先 register" }, 400);
     }
   } catch {
     return c.json({ error: "club_taken", message: "该俱乐部已关联其他球队" }, 400);
   }
-  await c.env.DB.prepare(
-    "INSERT INTO audit_log (account_id, event, detail, ip, created_at) VALUES (NULL, 'team.link', ?, ?, ?)",
-  ).bind(JSON.stringify({ tour_team_id: tourTeamId, club_id: clubId }), clientIp(c), nowIso());
   return c.json({ ok: true });
 });
 
