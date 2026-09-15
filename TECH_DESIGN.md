@@ -268,6 +268,8 @@ CREATE TABLE audit_log (
 );
 ```
 
+增量 7 落地补记（0008 迁移 `migrations/0008_team_binding.sql`，实现与草案一致处以迁移为准）：新增 `team`（`tour_team_id`/`club_id` 均唯一可空的目录）、`team_bind_code`（中央码表：`code_hash` 唯一、`via` 记发码入口、`used_by` 记烧码账号）、`team_binding`（PK(account_id,team_id) + UNIQUE(account_id) 一账号一队）。机器端点（`src/routes/machine.ts`，与既有 `/api/bind/claim` 共用 machineGate 限流+验签，X-Sign = hex(HMAC-SHA256(BIND_SECRET, "POST|path|ts|raw"))，±300s）：`POST /api/team/bindcode`（team_id/tour_team_id/club_id 恰一，ttl 1–720h，明码只回一次）、`POST /api/team/bind`（烧码+一账号一队前置，单事务原子）、`POST /api/team/unbind`、`POST /api/team/register`（目录登记 upsert）、`POST /api/team/link`（补 club_id 关联）。
+
 ### 5.3 过渡期与终态的差异（重要）
 
 | | 过渡期（步骤①②） | 终态（步骤③后） |
@@ -277,9 +279,9 @@ CREATE TABLE audit_log (
 | 会话 | auth 会话写 D1 `session`（OIDC 用）+ 兼容键写共享 KV（老 client 用） | 仅 D1；共享 KV 绑定移除 |
 | ID | account.id = tour user.id 同值 | 新用户继续沿用同一序列 |
 
-要点：**球队不进 auth 的 identity**。球队绑定是业务资源关系，留在 club 库（`club_bindings`）；谈判插件的「QQ→球队」将来由 `identity(qq) → account → club_bindings` 链推导（数据模型已留路：`identity.provider` 可扩展）。
+要点（**增量 7 改判，推翻本节最初裁定**）：最初裁定「球队不进 auth 的 identity——球队绑定是业务资源关系，留在 club 库」。但 tour 与 club 各有一套球队认证互不相通，裁决把**球队绑定关系上收 auth 成为唯一真源**：0008 迁移新增 `team`（tour team ↔ club club 的目录，`tour_team_id`/`club_id` 均唯一可空）、`team_bind_code`（中央码表，tour/club 双入口发码写同一张表）、`team_binding`（UNIQUE(account_id) 一账号一队，一队可多账号）；机器端点五条 HMAC（`/api/team/bindcode|bind|unbind|register|link`，密钥共用 BIND_SECRET）。tour/club 双侧发码/烧码界面保留，写同一张 auth 中央表（烧码在 auth 单事务原子）；两侧旧码表/绑定表（tour `auth_code`/`team_member`、club `club_bind_code`/`club_bindings`）休眠保留防回滚，代码不再读写；两侧经只读 `AUTH_DB` D1 绑定派生读（`SELECT t.tour_team_id/club_id FROM team_binding b JOIN team t ON t.id=b.team_id WHERE b.account_id=?`）。存量迁移：`scripts/migrate-team-bindings.mjs` 以 tour `team_member` 为基准全量迁 `team_binding`，目录按队名精确匹配建行（撞名不自动关联），club 绑定做校对、冲突/单边出报告人工裁决。谈判插件的「QQ→球队」将来由 `identity(qq) → account → team_binding → team` 链推导。
 
-**赛事平台降级改造点**：登录/注册页跳 auth；`attachUser` 中间件从「读 KV+查 user 表」改为 OIDC 会话校验；`/api/auth/*` 退役；admin 账号管理职能迁 auth 管理台（P1）；`team_member`/`signup_code` 等业务表不动（tour D1 仍是业务真源）。
+**赛事平台降级改造点**：登录/注册页跳 auth；`attachUser` 中间件从「读 KV+查 user 表」改为 OIDC 会话校验；`/api/auth/*` 退役；admin 账号管理职能迁 auth 管理台（P1）；`team_member`/`signup_code` 等业务表不动（tour D1 仍是业务真源；绑定真源随增量 7 上收 auth，`team_member` 随迁移休眠）。
 
 ## 6. 权限点模型（任务书问题 4）
 
