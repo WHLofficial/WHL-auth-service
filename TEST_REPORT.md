@@ -372,3 +372,52 @@
 3. **生产库 `d1_migrations` 账本一致性未查**：本地开发库存在「表都在、账本为空」的历史遗留（`npm run db:migrate:local` 会以 `table account already exists` 失败，测试用隔离目录不受影响）。部署 `0009_admin.sql` 前须先查远端账本，否则会重复建表失败。
 4. 管理动作的**并发**未专门压测（角色差集与「传全集」幂等设计使重复提交无副作用，但两个管理员同时改同一账号的后写覆盖前写未测）。
 
+---
+
+## 11. 增量 9：P0 契约对齐与残留清理（2026-09-18）
+
+**范围**：四项——A 透明重哈希 + 迭代数压测决策（auth）、B guess 绑定闭环（auth + guess）、C compat 开关显式化（tour/guess/club）、D 残留清理（tour/guess）。§9 的限流 KV→D1 偏差于本轮获用户认可定案（见 §9 标注）。
+
+### 11.1 A 透明重哈希 + 25k→50k 决策
+
+- **实现**：`src/lib/crypto.ts` 新增 `hashIterations()` 判档；`src/routes/pages.ts` 登录成功后台（`runDetached`/waitUntil，不挡响应）检测 `credential` 存档迭代数低于当前档时用当前参数重派生并一条 UPDATE 回写 + `pw.rehash` 审计（`AuditEvent` 新增该项）。失败不影响本次登录，下次登录自然重试。改密/管理员重置本来就写当前档，无需处理。
+- **压测**：`scripts/bench-pbkdf2.mjs`（Node 24.12 原生 WebCrypto，5 轮中位）：25k = **10.0ms**、50k = **18.0ms**、100k = 35.9ms，近线性翻倍。Free 档 CPU 上限 10ms/请求（TECH_DESIGN §12 已核实链接），**25k 已贴线，50k 必超 → 决策保持 25k**，结论回写 TECH_DESIGN §8-1 与 §12 假设 5（原「需本地压测确认」已证伪）。上 Paid 再议提档；哈希格式自带迭代数，届时只改常量、透明重哈希自动滚动存量。
+- **e2e**：种 1000 迭代存量 → 登录成功 → 后台升到 25000 且新哈希验密通过 → `pw.rehash` 审计带 `from:1000` → 升级后二次登录正常。
+
+### 11.2 B guess 绑定闭环（镜像退役 + 实时查询）
+
+- **auth 侧**：新增 `POST /api/admin/identity/lookup`（只读，照 list 先例不记审计）：body `{account_ids: number[]}`，去重、单批 ≤100（超限 400）、一条 `IN` 查询禁 N+1，返回 `{bindings: [{account_id, qq_id, bound_at}]}`，未绑定 id 静默不出现。走 `machineGate`（与全部机器端点共用 300/15min 桶）。
+- **guess 侧**（新增 `src/_lib/authLookup.ts`，HMAC 契约与 auth machineGate 逐字一致，5s 超时）：
+  - **停镜像**：`mirrorBinding` 及调用删除——登录路径 **-2 写**（原镜像 batch 的 INSERT/DELETE），根除「qq=null 被当解绑 DELETE 本地行」的生产事故面（2026-09-14）。
+  - **读点改造**（OIDC 模式实时查 auth，兼容模式原样只读）：/me 绑定展示（failOpen：通道故障按未绑定展示，不挡进站）、预测门槛（fail-closed：故障 503 宁拒不误放）、管理用户列表 `bound` 标记（failOpen）、对账详情 qq 列（fail-closed）、**发奖批量**（fail-closed；原「登录时点快照」改实时批量，根治快照过期）。
+  - **账号口径**：guess `users.id` 是 AUTOINCREMENT、与 auth `account_id` **不同值**；映射锚 = `users.tour_id`（= auth sub，同值迁移）。单用户场景直传 `user.tour_id`；批量场景（发奖/对账/列表）先一条 `users IN` 换算再 lookup（`lookupQqByLocalIds`，本地 +1 读 +1 子请求封顶，无 N+1）。
+  - `user_binding` 表停写停读、**保留不 DROP**（历史对账用）；guess `bind/new`/`bind/claim` 的 OIDC 收口门（400 `bind_moved`，P0-8 所做）不受影响。
+
+**D1 读写基线（静态语句计数口径，非运行时测量）**
+
+| 路径 | 变化 |
+| --- | --- |
+| auth 登录（稳态） | +0 读 +0 写；legacy 低迭代账号一次性 +1 写（重哈希）+1 写（审计），waitUntil 后台 |
+| auth lookup 端点 | 每请求 1 读（IN ≤100） |
+| guess 登录回调 | **-2 写**（镜像退役） |
+| guess /me | 本地 +0（原 user_binding 读移除），+1 子请求（auth 1 读） |
+| guess 预测门槛 | 本地 -1 读，+1 子请求 |
+| guess 用户列表 | 本地 +0（JOIN 保留、结果被覆盖），+1 子请求 |
+| guess 对账详情 | 本地 -1 读（跳过 DISTINCT JOIN），+1 子请求 |
+| guess 发奖 | 本地读数持平（全表 SELECT → users IN），+1 子请求 |
+
+### 11.3 C compat 开关显式化 + D 残留清理
+
+- **C**：tour/guess/club 三仓 `isOidc()` 改判 `AUTH_MODE === "oidc"`（+ `OIDC_ISSUER`/`OIDC_CLIENT_ID` 齐备），`AUTH_MODE: "oidc"` 进各自 wrangler.jsonc `[vars]` 随部署走；tour `dev:oidc` 加 `--var AUTH_MODE:oidc`；三仓测试 stub 补 `AUTH_MODE`；club `/api/me` 的 `authMode/authHome/syncProbe` 收敛到导出的 `isOidc` 单点判定。回滚开关 = 撤掉 AUTH_MODE 重新部署。
+- **D**：tour `worker/routes/auth.ts` register/password 的兼容直写分支删除（compat 一律 410，OIDC 跳转保留），**tour `user` 表自此代码零写入**；guess register/password 同口径删除（compat 410）。login 兼容分支只读保留（有测试覆盖的回滚通道）；guess `TOUR_DB` binding 与 30 天本地会话表随 compat 登录保留（grep 证实仍有只读引用，非死码——**有意保留**，与计划的「仅当零引用才删 binding」条件相符）。
+
+### 11.4 验证与遗留
+
+- **auth**：typecheck 绿；全套 `npm test` 全绿（本轮 113 例，较增量 8 的 110 新增 3：透明重哈希 e2e 1 + lookup e2e 1 + crypto/hashIterations 单测 1）；admin e2e 单跑 14/14。
+- **tour**：typecheck 绿、vitest 115 passed + 6 skipped（新增 compat register 410 断言）。
+- **guess**：vitest 16/16（镜像三用例重写为「停写 + 实时查询」口径，lookup 桩带 HMAC 验签）。
+- **club**：typecheck 绿、vitest 316/316（仅 C 项小改）。
+- **跨服务实联**：本地起 auth dev，HMAC 签名实打 `/api/admin/identity/lookup`（命中/未命中/去重语义正确）；tour `tests/admin.live.test.ts` 6/6。
+- **部署注意（生产）**：guess 需 `wrangler secret put AUTH_BIND_SECRET`（与 auth `BIND_SECRET` 同值；本地已写入 `.dev.vars`）；**上线前必须确认插件 `bind_claim_url` 已指向 auth**（本来就是待办）——若插件仍走 guess 老回退绑定，新读点看不到该绑定，用户会被判未绑定。
+- **遗留**：lookup 挂在 `/api/admin/*` 前缀下但实为 RP 通用只读查询（沿用批准的计划命名）；guess 用户列表的 `user_binding` JOIN 未删（OIDC 下结果被 lookup 覆盖，省一次改动面，记入增量 10 可选清理）。
+

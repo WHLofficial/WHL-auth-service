@@ -377,7 +377,7 @@ userinfo 按 access token 的 `aud` 只返回**该 client 的**角色与权限�
 | **② 切 client** | 1. **club**：首次部署即 OIDC（试点，验证全链路）→ 2. **guess**：登录/注册入口指 auth、直写 tour 库代码下线、本地 30 天会话退役、user_binding 迁 auth.identity、插件改 bind_claim_url → 3. **tour**：登录页跳 auth、attachUser 改造 | 每系统一个 compat 开关（环境变量） | ①已稳定运行 |
 | **③ 收口** | user → account 一次性迁移 + 校验脚本；tour user 表转只读；auth 管理台（P1）接管账号管理；共享 KV 停写，旧会话 7 天自然过期；guess/tour 移除 TOUR_DB user 读写与共享 KV 绑定 | tour 彻底降级 | 校验全绿 + 管理台就绪 |
 
-**③ 收口现状（2026-09-18）**：账号迁移（`scripts/migrate-accounts.mjs` + `verify-accounts.mjs`）、共享 KV 停写、auth 不再绑定 TOUR_DB 均已完成；**管理能力于增量 8 补齐**（12 条机器端点 + tour 管理台改道，tour 侧 6 处指向自己 user 表的死写全部修掉）。尚未完成的两项：tour/guess 里旧注册、改密、`/api/auth/*` 的**写代码仍在文件里**（生产走 `if (isOidc()) return redirect(...)` 分支不可达，仅代码未删），以及 guess 侧 `TOUR_DB` 绑定与本地 30 天会话表的代码保留。
+**③ 收口现状（2026-09-18，增量 9 更新）**：账号迁移（`scripts/migrate-accounts.mjs` + `verify-accounts.mjs`）、共享 KV 停写、auth 不再绑定 TOUR_DB 均已完成；**管理能力于增量 8 补齐**（12 条机器端点 + tour 管理台改道）；**增量 9 残留清理已做**——tour/guess 的 register/password 直写 user 表死码已删（兼容模式一律 410），tour `user` 表自此代码零写入（只读，表保留）；guess 登录路径镜像写入退役、五个读点改实时查 auth（§5.2 guess user_binding 闭环）。仍保留（有意，非遗漏）：tour/guess 的 compat 登录只读分支（有测试覆盖的回滚通道）、guess `TOUR_DB` 绑定（compat 登录仍只读引用）、guess 本地 30 天会话表（随 compat 登录保留）。**compat 开关已显式化**：三 RP 的 `isOidc()` 改判 `AUTH_MODE === "oidc"`（+连接变量齐备），`AUTH_MODE: "oidc"` 写死在各自 wrangler.jsonc `[vars]` 随部署走——TECH_DESIGN §7 表格里「compat 开关（环境变量）」的承诺就此兑现，不再靠 OIDC_ISSUER 有无隐式判定。
 
 ### 9.2 双登录态说明
 ①②期间 auth 登录页与 tour 登录页**并存**：同一账号两边登录都有效（同一会话格式、同一张 user 表），注册双入口写同一张表（决策 #4）。这正是过渡期的意义——用户无感知，系统逐个换引擎。
