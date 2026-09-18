@@ -526,3 +526,38 @@ test("边界：不能对自己动手 / 缺参 400 / 未持有的角色键拒绝"
   assert.equal(missingAccount.status, 404);
   assert.equal(missingAccount.json.error, "account_not_found");
 });
+
+test("身份查询（增量 9B）：批量返回 qq 映射、未绑定不出现、去重；空名单/>100 拒 400；缺签 401", { skip: SKIP }, async () => {
+  const c = machineClient();
+  const u1 = await freshUser("lookup");
+  const u2 = await freshUser("lookup");
+  const u3 = await freshUser("lookup");
+  const now = nowIso();
+  H.sqlExec(
+    `INSERT OR IGNORE INTO identity (account_id, provider, provider_uid, verified_at, bound_at)
+     VALUES (${u1.id}, 'qq', 'qq-lookup-111', ${Q(now)}, ${Q(now)}), (${u2.id}, 'qq', 'qq-lookup-222', NULL, ${Q(now)});`,
+  );
+
+  const empty = await admin(c, "/api/admin/identity/lookup", { account_ids: [] });
+  assert.equal(empty.status, 400);
+  const many = await admin(c, "/api/admin/identity/lookup", { account_ids: Array.from({ length: 101 }, (_, i) => i + 1) });
+  assert.equal(many.status, 400);
+
+  const nosign = await c.raw("/api/admin/identity/lookup", {
+    method: "POST",
+    retry: false,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ account_ids: [u1.id] }),
+  });
+  assert.equal(nosign.status, 401, "机器门先于业务逻辑（缺签 401）");
+
+  // 重复 id 去重；不存在的账号（u3 / 999999999）静默不出现在结果里
+  const ok = await admin(c, "/api/admin/identity/lookup", { account_ids: [u1.id, u2.id, u3.id, u3.id, 999999999] });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(ok.json, {
+    bindings: [
+      { account_id: u1.id, qq_id: "qq-lookup-111", bound_at: now },
+      { account_id: u2.id, qq_id: "qq-lookup-222", bound_at: now },
+    ],
+  });
+});

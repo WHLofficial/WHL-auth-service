@@ -136,6 +136,27 @@ app.post("/api/admin/catalog", async (c) => {
   });
 });
 
+// QQ 身份批量查询（增量 9B，guess 绑定闭环的读通道）：绑定真源在 identity 表，RP 侧不再维护
+// 本地镜像快照，改实时查这里。只读、不记审计（照 catalog/list 先例）；一条 IN 查询（单批 ≤100），
+// 未绑定的 id 不出现在结果里。入参用 auth account.id（guess users.tour_id / tour user.id 同值）。
+app.post("/api/admin/identity/lookup", async (c) => {
+  const m = await machineBody(c);
+  if ("err" in m) return m.err;
+  const ids = Array.isArray(m.body.account_ids)
+    ? [...new Set(m.body.account_ids.map(int).filter((n): n is number => n !== null))]
+    : [];
+  if (ids.length === 0) return bad(c, "bad_request", "account_ids 不能为空", 400);
+  if (ids.length > 100) return bad(c, "bad_request", "account_ids 单批上限 100", 400);
+  const rows = rowsOf<{ account_id: number; provider_uid: string; bound_at: string }>(
+    await c.env.DB.prepare(
+      `SELECT account_id, provider_uid, bound_at FROM identity WHERE provider = 'qq' AND account_id IN (${ids.map(() => "?").join(",")})`,
+    ).bind(...ids).all(),
+  );
+  return c.json({
+    bindings: rows.map((r) => ({ account_id: r.account_id, qq_id: r.provider_uid, bound_at: r.bound_at })),
+  });
+});
+
 // 账号列表：两次读（账号页 + 该页账号的角色），代码层合并，禁止 N+1。
 // 会话不进列表（只在 detail 按需查）——列表要翻页浏览，逐行带会话计数会把它变成 N 次子查询。
 app.post("/api/admin/accounts/list", async (c) => {
