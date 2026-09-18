@@ -111,12 +111,18 @@ app.post("/login", async (c) => {
   const [nameOk, row] = await Promise.all([
     rateLimit(c.env, `login-name:${ip}:${name}`, 5, 900),
     c.env.DB.prepare(
-      `SELECT a.id, a.locked, a.must_change_pw, cr.hash AS password_hash
+      `SELECT a.id, a.locked, a.must_change_pw, a.disabled_at, cr.hash AS password_hash
          FROM account a JOIN credential cr ON cr.account_id = a.id AND cr.type = 'password'
         WHERE a.name = ?`,
     )
       .bind(name)
-      .first<{ id: number; locked: number; must_change_pw: number; password_hash: string }>(),
+      .first<{
+        id: number;
+        locked: number;
+        must_change_pw: number;
+        disabled_at: string | null;
+        password_hash: string;
+      }>(),
   ]);
   if (!nameOk) {
     await audit(c, "login.rate_limited", { detail: { scope: "ip+name", name } });
@@ -132,6 +138,12 @@ app.post("/login", async (c) => {
       return fail(429, "这个账号尝试太频繁，请 15 分钟后再来");
     }
     return fail(401, "昵称或密码不正确");
+  }
+  // 停用账号（增量 8）：判定必须在验密之后——否则拿任意密码去撞就能探出某个昵称是否被停用。
+  // 密码正确才走到这里，此时告知真实原因既安全又省掉一次无效的改密往返。
+  if (row.disabled_at) {
+    await audit(c, "login.fail", { accountId: row.id, detail: { name, reason: "disabled" } });
+    return fail(401, "该账号已被停用，请联系管理员");
   }
   const token = await createSession(c, row.id);
   // 清账号限流 + audit login.ok 都不挡响应：waitUntil 后台（测试无 executionCtx 就地 await）

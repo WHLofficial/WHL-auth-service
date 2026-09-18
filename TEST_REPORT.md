@@ -223,6 +223,7 @@
 **用法**：`npm run test`（`package.json` scripts → `node tests/run.mjs`）。可选 `AUTH_TEST_PORT` 指定端口、`AUTH_TEST_KEEP=1` 保留临时目录与 dev 日志（默认删）、`AUTH_TEST_ONLY=<片段>` 只跑匹配的测试文件（定位偶发问题用）。
 
 **最终结果**：**87 tests / 87 pass / 0 fail / exit 0**，耗时 **269s**（日志 `C:/Users/bhdjb/AppData/Local/Temp/auth-final-run.log`）。加固后的历史运行另含完整跑 2 次 79/79（修复前的基线，162s / 170s）与多次定向跑全绿。
+> 本节数字是**增量 6 的基线**。此后增量 7 追加 `tests/e2e/team.test.mjs`（5 例）、增量 8 追加 `tests/e2e/admin.test.mjs`（13 例），当前总数为 **110 tests / 110 pass**（详见 §10.4）。
 
 **它做了什么**：删除并重建 `.wrangler/test-state` → 在**该隔离目录**上跑 `d1 migrations apply`（不碰开发实例的库）→ 找一个空闲端口起 `wrangler dev --persist-to <隔离目录>` → 轮询 `/healthz` → 播种测试数据（`test-rp` 这个 app 行 + 一枚 `REGR-<hex>` 注册码，`max_uses` 100000）→ 用 `node --test` 跑 unit + e2e（11 个文件）。因为每次都是全新库，不需要清理限流桶或测试账号。
 
@@ -243,6 +244,9 @@
 | `tests/e2e/ratelimit.test.mjs` | 2 | **L-2**：`/userinfo` 600/900（第 601 次 429）；机器端点 300/900 且"先限流后验签"，两端点共用一条桶 |
 | `tests/e2e/logout.test.mjs` | 6 | **F-I**（RP 先自吊销 refresh 后仍须收到通知）、正常登出（恰 1 条通知 + 会话吊销 + refresh 全吊销）、`GET /logout` 白名单内外、无授权时不广播不报错、CSRF 无效不误登出、**L-1 跨站被拒** |
 | `tests/e2e/register.test.mjs` | 9 | 有效码、开放注册开关两态、重名不烧码、无效码三态文案、**并发双花**（3 并发 → 恰 1 个账号）、密码/昵称规则 6 例（含 33 字符昵称必须 400 而非 500）、CSRF、注册 IP 桶 5/3600、已登录回跳 |
+
+| `tests/e2e/team.test.mjs`（增量 7） | 5 | 球队目录登记/发码/烧码（含并发竞速输家整批零写回 `invalid_code`）/一账号一队/解绑与派生读 |
+| `tests/e2e/admin.test.mjs`（增量 8） | 13 | 见 §10.2（管理机器端点全量 + 审计 + 停用语义 + 跨服务实联另见 tour 侧） |
 
 **支撑库**：`tests/lib/client.mjs`（cookie jar + 表单 + CSRF 提取，**每个 Client 默认注入独立随机 `CF-Connecting-IP`**，否则本地共享 `local` 桶会互相打死；所有请求带 `connection: close`，不复用连接以规避 keep-alive 陈旧 socket 抖动）、`tests/lib/env.mjs`（wrangler CLI 封装，对 Windows 上 `ECONNRESET/EBUSY/SQLITE_BUSY` 做退避重试）、`tests/lib/harness.mjs`（注册/登录/授权码/换码/刷新/吊销/back-channel 接收器/JWKS 验签）、`tests/lib/loader.mjs`（**必需**：Node 24 原生 TS 剥离不会给 `src` 内部省略扩展名的相对导入补 `.ts`，此 loader 用 `module.registerHooks` 补上，否则 `hmac`/`oidc`/`csrf`/`session` 等模块无法在单测里导入 —— 产品代码一行未改）。
 
@@ -294,3 +298,77 @@
 4. 压力与性能（Free 档 10ms CPU 限制下 PBKDF2 25k 迭代余量、D1 写放大）未压测。
 
 **测试环境的已知坑（供后续复用）**：本地 wrangler dev **不注入 `CF-Connecting-IP`**，`clientIp` 回退 `"local"`，所以测试客户端必须自己注入随机 IP；账号级限流桶跨用例污染 → 每个用例注册自己的账号（新 Client = 新 IP）；已登录后 `GET /login` 直接 303 拿不到 csrf 表单，需复用先前取到的 token；本地 Windows 上 undici 的 keep-alive 池偶发复用陈旧 socket（`ECONNRESET`）→ 测试客户端已改为 `connection: close`，套件另对连接级失败整轮重试一次（见 §7）；`node --import tests/lib/loader.mjs` 是单测跑产品源码的必要条件。
+
+---
+
+## 10. 增量 8：账号管理能力落到 auth（2026-09-18）
+
+**背景（要修的缺陷）**：账号真源 2026-09-14 已收口到 auth（`account`/`credential`/`user_role`），但 tour 管理台的写操作仍打自己已归档的 `user` 表，**6 处死写且无一处有 OIDC 门控**：改角色（`worker/routes/admin/accounts.ts:61`）、解锁观众号（`:72`）、重置密码（`:87-88`，发出的临时密码登不进去）、开放注册开关（`worker/routes/admin.ts:50`）、注册码生成（`:57-73`，生成的码一个都用不掉）、注册码列表（`:76-96`，列出的永远是用不掉的码）。管理员日常入口批量失效，且当时 auth 侧**没有任何账号管理端点**（`src/routes/machine.ts` 只有球队绑定五条 + 绑定两条），线上无可用入口做「重置密码 / 解锁 / 改角色」。
+
+**做法**：界面继续留在 tour，auth 只出能力——新增 12 条 POST + HMAC 管理机器端点，tour 管理台改为转发调用。四题决策见 `PRD.md` §3 决策 11–14。
+
+### 10.1 新增能力清单
+
+| 端点（全 POST，`machineGate` 限流 + 验签） | 说明 |
+| --- | --- |
+| `/api/admin/accounts/list` | 账号列表：一次查询 LEFT JOIN 绑定球队（`team_id`/`team_name`），角色第二次查询按 `IN (...)` 合并——**禁止 N+1**；keyset 分页（`after`/`limit`，上限 500），会话不进列表 |
+| `/api/admin/accounts/detail` | 账号 + 角色 + 账号级授予 + 存活会话（含 IP/登录时间/最后活跃/过期，LIMIT 50）+ QQ，**一个 `DB.batch` 五条语句一次往返** |
+| `/api/admin/catalog` | 角色 / 权限点 / app / 角色→权限点映射；isolate 内存缓存 60s（照 `src/lib/csp.ts` 先例，TTL 60s、失败不缓存） |
+| `/api/admin/accounts/roles` | 传「应有角色全集」，auth 算差集增删（幂等）；涉及全局超管一律 403 `superadmin_locked` |
+| `/api/admin/accounts/grants` | 账号级「额外授予」权限点（只加不减由界面保证，接口传全集）；未知键 400 `bad_permission` |
+| `/api/admin/accounts/password` | 生成临时密码 + `must_change_pw=1` + **吊销该账号全部会话** + back-channel 通知；超管 403 |
+| `/api/admin/accounts/unlock` | 解锁观众号；已是解锁态返回 `changed:false` 且**不写审计** |
+| `/api/admin/accounts/disable` | 停用/启用（`disabled_at`），停用同时吊销全部会话；超管 403 |
+| `/api/admin/sessions/revoke` | 单个会话强制下线（带 `session_hash`）或整账号吊销；幽灵 hash 404 `session_not_found` |
+| `/api/admin/org-settings` | 不带 `allow_open_reg` = 读，带 = 写（真源 `organization` 表） |
+| `/api/admin/signup-codes/create` | 发注册码，**明码只在响应里出现这一次**（库里存 `code_hash`） |
+| `/api/admin/signup-codes/list` | 注册码列表，`id` 是 `code_hash` 前 12 位指纹（auth 的 `signup_code` 无自增 id，明码不可回查） |
+
+**数据层（`migrations/0009_admin.sql`）**：新增 `account_permission`（账号级额外授予）、`account.disabled_at`（停用；`locked` 语义完全不动）、`session.ip`。`session.last_seen_at` 是既有列，本轮开始写入（**热路径节流 5 分钟**）。
+
+**审计**：`AuditEvent` 扩 11 项（`role.grant`/`role.revoke`/`perm.grant`/`perm.revoke`/`session.revoke`/`pw.reset`/`account.disable`/`account.enable`/`account.unlock`/`signup_code.create`/`org.open_reg`），补齐了 TECH_DESIGN §8.8 要求但一直缺入口的 `role.grant`/`role.revoke`/`session.revoke`。新增 `auditStatement()` 供 `DB.batch` 使用——**业务写入与审计同一次批**（原先 `audit()` 只能单独 `.run()`，无法进批）。tour 侧对同一动作另记一份本地审计（`target_type='account'`，带 `actor_user_id`），双写沿用增量 7 球队绑定的先例。
+
+**权限下发改造**：`oidc.ts permissionsFor` 从「全表拉 role_permission 再在 JS 过滤」改为一条 UNION SQL（角色派生 ∪ 账号级授予，后者按 `p.app_id = aud` 收紧），**调用点不变、往返数不变**。userinfo/id_token claims 新增 `disabled`；被停用账号 `/userinfo` 下发空 roles/permissions，`/token` 换码与刷新回 `invalid_grant`，会话中间件把 `disabled_at` 与吊销/过期并列为一道闸。
+
+### 10.2 新增测试
+
+| 文件 | 用例数 | 覆盖 |
+| --- | --- | --- |
+| `tests/e2e/admin.test.mjs` | 13 | 机器门（无签/伪签/跨路径签名 401、非法 JSON 400）；目录（3 app / 7 角色 / 17 权限点 / 角色权限映射 / 超管持全部）；列表（q 过滤、角色带 app 前缀、不含 sessions、`limit=1` keyset 翻页、未绑队 `team_id=null`）；详情（含 IP 与会话、不存在 404）；角色授权（差集 + `role.grant` 审计含 actor_id + 传全集幂等零审计 + 未知键 400 + 超管 403）；额外授予（当场进 userinfo、不跨 app 泄漏、只加不减）；重置密码（临时密码格式、会话全吊销、旧会话失效、旧密码 401、临时密码跳改密页、超管 403）；解锁（`changed` 两态 + 已解锁不写审计）；停用（会话吊销 + 登录 401 + userinfo `disabled` 且 roles/permissions 清空 + refresh `invalid_grant` + 启用恢复 + 超管 403）；强制下线（单会话只踢一个 + 幽灵 hash 404 + 整账号吊销）；org-settings 读写回环；注册码（创建 → 真能注册 → 列表按指纹找回 → 二次使用被拒 → 审计不含明码）；边界（`self_forbidden`、缺参 400、roles 非数组 400、账号不存在 404） |
+| `WHL-tournament-management-system/tests/admin.live.test.ts` | 6 | **跨服务实联冒烟**（不替换 fetch，用真实 HMAC 打真实跑着的 auth Worker，未设 `AUTH_LIVE_URL`/`AUTH_LIVE_SECRET` 则整文件 skip）：目录 3 系统/7 角色/17 权限点；列表 camelCase 字段类型；不存在账号抛 `AuthApiError.code === "account_not_found"`（证明 body 解析正常而非 `bad body`）；org-settings 读布尔；注册码列表指纹格式；**注册码写入回环**——经 tour 发的码用 `sha256(code).slice(0,12)` 能在列表里找回（死写回归的跨服务版本） |
+| `WHL-tournament-management-system/tests/oidc.test.ts` | +1（共 13） | 账号管理台路由层：管理端点转发认证中心 + snake_case → camelCase 映射 + 无 `tour.accounts.manage` 的教练 403（含路由路径与前端调用路径一致性的回归） |
+
+### 10.3 D1 读写基线（静态语句计数，非运行时测量）
+
+口径：数的是代码里的 D1 语句条数（`prepare().run()`/`batch()` 内每句算一条），**不含** PBKDF2 计算与 KV 操作。`getSessionUser` 是每请求中间件（`src/index.ts:14-17`），有会话 cookie 时固定 2 读（session JOIN account、user_role），无 cookie 时 0（早退）。
+
+| 场景 | 读 | 写 | 说明 |
+| --- | --- | --- | --- |
+| 登录一次（`POST /login`，无会话 cookie） | 1 | 5 | 读 = 账号+凭证查询；写 = IP 限流、账号限流、INSERT session、后台清账号限流、后台 audit login.ok（后两条 `waitUntil` 不挡响应 → **阻塞往返 3 次**） |
+| 鉴权一次（带会话访问任意页） | 2 | 0（每 5 分钟 1） | 2 读来自 `getSessionUser`；`last_seen_at` 埋点节流 5 分钟才写 1 次 |
+| 管理列表一次（`/api/admin/accounts/list`） | 2 | 1 | 读 = 账号页 + 角色 `IN`；写 = 机器端点限流。**无 N+1**：绑定球队随账号页 LEFT JOIN 一起取回 |
+| 管理详情一次（`/api/admin/accounts/detail`） | 5 | 1 | 5 条语句在**一个 `DB.batch`** 里（账号/角色/授予/会话/QQ），对 D1 是**一次往返**；写 = 机器端点限流 |
+
+对比改造前：tour 列表读自己 `user` 表 + `teamOfAccounts` 全表扫 `team_binding`/`team`（每次全表），现在改为 auth 侧一条 LEFT JOIN。管理端点全部 POST 单次往返，写操作「业务 + 审计」同批。
+
+### 10.4 回归结果（本轮实测）
+
+- auth：`npm run typecheck`（`tsc --noEmit`）干净；`npm test`（`node tests/run.mjs`）**110 tests / 110 pass**（§7 的 87 为增量 6 基线，增量 7 加 `team.test.mjs` 5 例、增量 8 加 `admin.test.mjs` 13 例）。
+- tour：`npm run typecheck`（`tsc --noEmit && tsc -p tsconfig.worker.json --noEmit`）干净；`npm test`（`vitest run`）**96 passed / 6 skipped**（skip 的是需真机 auth 的实联用例）；`npm run build`（vite）成功。
+- 跨服务实联：auth `npm run dev`（8792）+ tour `AUTH_LIVE_URL=http://127.0.0.1:8792 npx vitest run tests/admin.live.test.ts` → **6/6 通过**。
+
+### 10.5 偏差与未覆盖（增量 8）
+
+**偏差**
+
+- **管理台界面留在 tour，auth 只有能力层**（PRD 决策 11）：admin 端点只验 HMAC 不认人，鉴权由调用方权限点（`tour.accounts.manage` / `tour.org.settings`）负责，操作者身份靠 tour 会话决定后作 `actor_id` 传入。这是刻意的取舍——把管理台依赖 client 的问题留到下一次全面重构。
+- **注册码明文不可回显**：`signup_code` 主键是 `code_hash`（`migrations/0001_init.sql:91-98`），列表只能给 12 位指纹。界面文案已相应改为「码只显示一次」。
+- **权限点「额外授予」只加不减**（界面层保证），且对全局超管冗余（超管经 `CROSS JOIN permission` 已持全部权限点，界面禁用其授予区）。
+
+**未覆盖 / 未验证**
+
+1. **`last_seen_at` 埋点撞全站热路径的实际影响未压测**（节流 5 分钟后最坏每 5 分钟 1 次写）。退路：不展示「最后活跃」列，只显示 IP/登录时间/过期时间。
+2. **生产 CF 边缘行为与真实 HTTPS cookie 语义**仍未验证（沿用 §9 的口径）。
+3. **生产库 `d1_migrations` 账本一致性未查**：本地开发库存在「表都在、账本为空」的历史遗留（`npm run db:migrate:local` 会以 `table account already exists` 失败，测试用隔离目录不受影响）。部署 `0009_admin.sql` 前须先查远端账本，否则会重复建表失败。
+4. 管理动作的**并发**未专门压测（角色差集与「传全集」幂等设计使重复提交无副作用，但两个管理员同时改同一账号的后写覆盖前写未测）。
+

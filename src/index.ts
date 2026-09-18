@@ -6,6 +6,7 @@ import { getSessionUser } from "./lib/session";
 import routes from "./routes/pages";
 import oidcRoutes from "./routes/oidc";
 import machineRoutes from "./routes/machine";
+import adminRoutes from "./routes/admin";
 import { errorPage } from "./web/pages";
 
 const app = new Hono<AppEnv>();
@@ -50,6 +51,8 @@ app.get("/healthz", (c) => c.json({ ok: true }));
 app.route("/", routes);
 app.route("/", oidcRoutes);
 app.route("/", machineRoutes);
+// 管理能力（增量 8）：全部 POST + HMAC 验签，供 tour 管理台调用。/api/ 前缀天然豁免 must_change_pw 门禁。
+app.route("/", adminRoutes);
 
 app.notFound((c) => c.html(errorPage(404), 404));
 

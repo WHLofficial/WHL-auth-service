@@ -68,6 +68,7 @@
 | `GET /.well-known/openid-configuration`、`/jwks.json` | 发现与验签公钥（私钥存 Worker Secret，`kid` 支持轮换） |
 | `POST /revoke` | 吊销 access/refresh token |
 | `GET/POST /logout` | 吊销 auth 会话 + 该会话签发的全部 token；back-channel POST 各 client `backchannel_logout_uri`（logout_token JWT） |
+| `POST /api/admin/*`（增量 8，12 条） | 管理能力机器端点，**POST-only + HMAC 验签**（与球队绑定共用 `machineGate`，密钥 `BIND_SECRET`，契约 `X-Sign = hex(HMAC-SHA256(secret,"POST\|path\|ts\|raw"))`）：`accounts/list`、`accounts/detail`、`catalog`、`accounts/roles`、`accounts/grants`、`accounts/password`、`accounts/unlock`、`accounts/disable`、`sessions/revoke`、`org-settings`、`signup-codes/create`、`signup-codes/list`。调用方是 tour 管理台（`worker/lib/authAdmin.ts`）；操作者身份由 tour 会话决定后作 `actor_id` 传入，auth 侧只认 HMAC 不认人（鉴权由调用方的权限点 `tour.accounts.manage` / `tour.org.settings` 负责），操作结果由 auth 记审计、tour 另记一份本地审计 |
 
 ## 4. 部署形态（任务书问题 6）——结论：纯 Workers + Static Assets
 
@@ -271,7 +272,6 @@ CREATE TABLE audit_log (
 增量 7 落地补记（0008 迁移 `migrations/0008_team_binding.sql`，实现与草案一致处以迁移为准）：新增 `team`（`tour_team_id`/`club_id` 均唯一可空的目录）、`team_bind_code`（中央码表：`code_hash` 唯一、`via` 记发码入口、`used_by` 记烧码账号）、`team_binding`（PK(account_id,team_id) + UNIQUE(account_id) 一账号一队）。机器端点（`src/routes/machine.ts`，与既有 `/api/bind/claim` 共用 machineGate 限流+验签，X-Sign = hex(HMAC-SHA256(BIND_SECRET, "POST|path|ts|raw"))，±300s）：`POST /api/team/bindcode`（team_id/tour_team_id/club_id 恰一，ttl 1–720h，明码只回一次）、`POST /api/team/bind`（烧码+一账号一队前置，单事务原子）、`POST /api/team/unbind`、`POST /api/team/register`（目录登记 upsert）、`POST /api/team/link`（补 club_id 关联）。
 
 ### 5.3 过渡期与终态的差异（重要）
-
 | | 过渡期（步骤①②） | 终态（步骤③后） |
 |---|---|---|
 | 账号真源 | **tour 库 user 表**（auth 直连读写，同 guess 现状模式） | auth 库 `account`/`credential`；tour user 表只读归档 |
@@ -280,6 +280,8 @@ CREATE TABLE audit_log (
 | ID | account.id = tour user.id 同值 | 新用户继续沿用同一序列 |
 
 要点（**增量 7 改判，推翻本节最初裁定**）：最初裁定「球队不进 auth 的 identity——球队绑定是业务资源关系，留在 club 库」。但 tour 与 club 各有一套球队认证互不相通，裁决把**球队绑定关系上收 auth 成为唯一真源**：0008 迁移新增 `team`（tour team ↔ club club 的目录，`tour_team_id`/`club_id` 均唯一可空）、`team_bind_code`（中央码表，tour/club 双入口发码写同一张表）、`team_binding`（UNIQUE(account_id) 一账号一队，一队可多账号）；机器端点五条 HMAC（`/api/team/bindcode|bind|unbind|register|link`，密钥共用 BIND_SECRET）。tour/club 双侧发码/烧码界面保留，写同一张 auth 中央表（烧码在 auth 单事务原子）；两侧旧码表/绑定表（tour `auth_code`/`team_member`、club `club_bind_code`/`club_bindings`）休眠保留防回滚，代码不再读写；两侧经只读 `AUTH_DB` D1 绑定派生读（`SELECT t.tour_team_id/club_id FROM team_binding b JOIN team t ON t.id=b.team_id WHERE b.account_id=?`）。存量迁移：`scripts/migrate-team-bindings.mjs` 以 tour `team_member` 为基准全量迁 `team_binding`，目录按队名精确匹配建行（撞名不自动关联），club 绑定做校对、冲突/单边出报告人工裁决。谈判插件的「QQ→球队」将来由 `identity(qq) → account → team_binding → team` 链推导。
+
+增量 8 落地补记（0009 迁移 `migrations/0009_admin.sql`）：新增 `account_permission`（账号级「额外授予」权限点，PK(account_id, permission_id)，主键索引即覆盖按 account_id 查询）、`account.disabled_at`（停用时间戳，NULL = 正常；**`locked` 语义不动**，它只挡绑队/提交阵容不挡登录）、`session.ip`（登录来源 IP，`createSession` 时写入）。权限下发随之改为两种来源的并集：`oidc.ts permissionsFor` 一条 UNION SQL = 角色派生（含全局角色）∪ 账号级授予（按 `p.app_id = aud` 收紧，不跨系统泄漏），仍只有 userinfo 一个调用点。userinfo/id_token claims 新增 `disabled`；被停用账号在 `/userinfo` 下发空 roles/permissions、`/token` 换码与刷新一律 `invalid_grant`，会话中间件把 `disabled_at` 与吊销/过期同列一道闸。会话新增 `last_seen_at` 埋点（全站热路径，**节流 5 分钟**才写库）；`revokeOneSessionAndNotify` / 账号级批量吊销 / back-channel 通知改为「一条 SQL 批量 + 各 client 地址一次查全」。
 
 **赛事平台降级改造点**：登录/注册页跳 auth；`attachUser` 中间件从「读 KV+查 user 表」改为 OIDC 会话校验；`/api/auth/*` 退役；admin 账号管理职能迁 auth 管理台（P1）；`team_member`/`signup_code` 等业务表不动（tour D1 仍是业务真源；绑定真源随增量 7 上收 auth，`team_member` 随迁移休眠）。
 
@@ -355,14 +357,14 @@ userinfo 按 access token 的 `aud` 只返回**该 client 的**角色与权限�
 
 | # | 项 | 方案 |
 |---|-----|------|
-| 1 | **密码哈希** | PBKDF2-SHA256 原格式直迁（25000 迭代，验密零阻力、常数时间比较）；登录成功透明重哈希升级迭代数。约束：Free 档 CPU 上限 10ms/请求（[已核实](https://developers.cloudflare.com/workers/platform/limits/#cpu-time)），25k→50k 需本地压测确认；开 Paid 可上 300k+（可选加固）。管理员重置密码流程沿用（临时密码 + must_change_pw） |
+| 1 | **密码哈希** | PBKDF2-SHA256 原格式直迁（25000 迭代，验密零阻力、常数时间比较）；登录成功透明重哈希升级迭代数。约束：Free 档 CPU 上限 10ms/请求（[已核实](https://developers.cloudflare.com/workers/platform/limits/#cpu-time)），25k→50k 需本地压测确认；开 Paid 可上 300k+（可选加固）。管理员重置密码流程沿用（临时密码 + must_change_pw）。**现状（2026-09-18）：透明重哈希升级与 25k→50k 压测均未实现**——`src/lib/crypto.ts` 迭代数 25_000，`verifyPassword` 只用存档里的迭代数，登录路径无重哈希回写；留作后续增量（与迭代数决策一起做） |
 | 2 | **会话固定** | 登录成功必发 256bit 新随机 token，不复用任何登录前值；OIDC code 一次性、≤60s、绑定 client+redirect_uri+PKCE challenge |
 | 3 | **CSRF** | client 侧 state+nonce（httpOnly cookie 存储校验）+ PKCE 强制；auth 表单 POST 带 CSRF token；cookie 延续 SameSite=Lax；redirect_uri 精确匹配 |
 | 4 | **防暴力破解** | 沿用 KV 固定窗口限流模式（登录 IP 10/15min + 账号 5/15min；注册 IP 5/h；绑定码限速）；命中写 audit_log；auth 用自己的 KV namespace，键前缀与现有 `rl:` 约定隔离 |
 | 5 | **QQ 绑定防冒充** | §7.2 四重校验（页码 + QQ 消息 + HMAC + 双向唯一） |
 | 6 | **token 过期刷新** | refresh token 轮换（一次性，重用检测 → 吊销整族 `family_id`）；auth 会话 7 天（对齐现状，可配）；client 本地会话有效期 ≤ auth 会话；access token 30min |
 | 7 | **登出传播** | OIDC 侧吊销即时（D1 强一致）；back-channel logout 通知各 client。兼容期 KV 键删除为最终一致——旧值最长可见至 cache TTL（[CF FAQ](https://developers.cloudflare.com/kv/reference/faq/)，未给默认秒数；**按 60 秒上限评估，标假设**），三系统每次请求都查 KV，故最坏 60 秒后全端失效，可接受并写入验收说明 |
-| 8 | **审计** | login.ok/fail、bind.claim/unbind、role.grant/revoke、session.revoke、pw.change 全量入 audit_log（含 IP）；observability 开启 |
+| 8 | **审计** | login.ok/fail、bind.claim/unbind、role.grant/revoke、session.revoke、pw.change 全量入 audit_log（含 IP）；observability 开启。**覆盖现状（2026-09-18）**：上述全部分类均已落地——原有 login.ok/login.fail/login.rate_limited/register.ok/register.rate_limited/logout/pw.change/bind.claim/bind.unbind/oidc.code_replay/oidc.refresh_reuse/team.* ；增量 8 补 role.grant、role.revoke、perm.grant、perm.revoke、session.revoke、pw.reset、account.disable、account.enable、account.unlock、signup_code.create、org.open_reg。管理端点的业务写入与审计**同一次 DB.batch**（`auditStatement`），杜绝「业务已改但审计缺失」；tour 侧对同一动作另记一份本地 audit_log（`target_type='account'`，带 actor_user_id），双写在增量 7 球队绑定上已有先例 |
 
 ## 9. 迁移与灰度（任务书问题 5）
 
@@ -375,20 +377,23 @@ userinfo 按 access token 的 `aud` 只返回**该 client 的**角色与权限�
 | **② 切 client** | 1. **club**：首次部署即 OIDC（试点，验证全链路）→ 2. **guess**：登录/注册入口指 auth、直写 tour 库代码下线、本地 30 天会话退役、user_binding 迁 auth.identity、插件改 bind_claim_url → 3. **tour**：登录页跳 auth、attachUser 改造 | 每系统一个 compat 开关（环境变量） | ①已稳定运行 |
 | **③ 收口** | user → account 一次性迁移 + 校验脚本；tour user 表转只读；auth 管理台（P1）接管账号管理；共享 KV 停写，旧会话 7 天自然过期；guess/tour 移除 TOUR_DB user 读写与共享 KV 绑定 | tour 彻底降级 | 校验全绿 + 管理台就绪 |
 
-### 9.2 双登录态说明
+**③ 收口现状（2026-09-18）**：账号迁移（`scripts/migrate-accounts.mjs` + `verify-accounts.mjs`）、共享 KV 停写、auth 不再绑定 TOUR_DB 均已完成；**管理能力于增量 8 补齐**（12 条机器端点 + tour 管理台改道，tour 侧 6 处指向自己 user 表的死写全部修掉）。尚未完成的两项：tour/guess 里旧注册、改密、`/api/auth/*` 的**写代码仍在文件里**（生产走 `if (isOidc()) return redirect(...)` 分支不可达，仅代码未删），以及 guess 侧 `TOUR_DB` 绑定与本地 30 天会话表的代码保留。
 
+### 9.2 双登录态说明
 ①②期间 auth 登录页与 tour 登录页**并存**：同一账号两边登录都有效（同一会话格式、同一张 user 表），注册双入口写同一张表（决策 #4）。这正是过渡期的意义——用户无感知，系统逐个换引擎。
 
 ### 9.3 回滚 runbook
 
+> **2026-09-18 改判（重要）**：①共享 KV 兼容桥自 2026-09-14 四系统全量切 OIDC 后**已停写**（`src/lib/session.ts` 顶部注释），旧 `sess:{token}` 条目随 7 天 TTL 自然归零（约 2026-09-21），**不存在「拨回共享 cookie 模式即恢复」的通道**；②TECH_DESIGN 初稿里的 R3 回写脚本（auth account → tour user）**从未实现**，`scripts/` 下没有该脚本。因此下述 R1 保留、R2 与 R3 已失效，改为「只回滚数据与开关，不回滚登录态」。
+
 | 场景 | 操作 | 用户影响 |
 |------|------|----------|
 | R1：①阶段 auth 异常 | auth 域名路由下线 | 无（tour 登录页未动过） |
-| R2：②某 client 切换后异常 | 该系统 compat 开关拨回「共享 cookie 模式」；auth 兼容期持续写 KV 键，故拨回即恢复 | 该系统用户重新登录一次 |
-| R3：③收口后 72h 内异常 | 恢复 tour user 表写权限 + 回写脚本（auth account → tour user）+ 全部开关拨回 | 轻微 |
-| R3 之后 | tour user 表已归档只读，回滚窗口关闭（需评估） | — |
+| R2：**已失效**（原「某 client 切换后拨回共享 cookie 模式」） | 该通道的两根支柱都已不存在：auth 侧不再写共享 KV，client 侧 compat 分支只剩代码未删。现状下 client 出问题的处置是**回滚该 client 的部署版本**（OIDC 变量一起回退），代价是该系统用户按旧登录页重新登录一次 | — |
+| R3：**已失效**（原「收口后 72h 内异常 → 恢复 tour user 表写权限 + 回写脚本」） | 回写脚本不存在，写权限恢复也无对象。现状下账号数据出问题的处置是**从 D1 时间点快照/备份恢复 auth 库**，或按 `audit_log` 逐条重放管理动作 | — |
+| 管理动作回滚（增量 8 起） | 管理台每个写动作在 auth 与 tour **双侧都有审计**（谁、何时、对谁改了什么），误操作按审计记录手工反向执行 | 轻微 |
 
-数据安全声明：迁移全程只做「复制 + 只读化」，无破坏性变更；三系统业务库自持不受影响。回滚演练纳入验收（PRD P0-13）。
+数据安全声明：迁移全程只做「复制 + 只读化」，无破坏性变更；三系统业务库自持不受影响。
 
 ### 9.4 部署清单（实操项）
 

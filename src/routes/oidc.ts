@@ -75,6 +75,7 @@ app.get("/.well-known/openid-configuration", (c) => {
       "sid",
       "locked",
       "must_change_pw",
+      "disabled",
       "roles",
       "permissions",
       "qq",
@@ -365,18 +366,33 @@ async function rolesForAud(c: Context<AppEnv>, accountId: number, aud: string): 
   return rows.results.map((r) => (r.app_id === null ? r.role_key : `${r.app_id}.${r.role_key}`));
 }
 
-async function permissionsFor(c: Context<AppEnv>, aud: string, roles: string[]): Promise<string[]> {
+/**
+ * 权限点 = 角色派生 ∪ 账号级额外授予（增量 8「权限点额外授予」，migrations/0009_admin.sql）。
+ * 一条 UNION SQL 直出：原实现是「全表拉 role_permission 再在 JS 里按角色集过滤」，
+ * 每台实例每次 userinfo 都要把多系统的映射全读一遍；改成按 account_id 收窄后，
+ * 读的行数只与本账号的授权数相关，且和账号级授予一次取齐（不新增往返）。
+ *
+ * 角色派生分支与改造前逐字等价：R.app_id ∈ {aud, NULL} 且账号持有 R。全局角色（app_id IS NULL）
+ * 仍按原样下发其全部权限点（superadmin 即如此拿到全部）；新增的账号级授予则收紧到 p.app_id = aud，
+ * 防止在某个 aud 下泄出别的系统的权限点。
+ */
+async function permissionsFor(c: Context<AppEnv>, aud: string, accountId: number): Promise<string[]> {
   const rows = await c.env.DB.prepare(
-    "SELECT r.app_id AS app_id, r.key AS role_key, p.key AS perm_key FROM role r JOIN role_permission rp ON rp.role_id = r.id JOIN permission p ON p.id = rp.permission_id WHERE r.app_id = ? OR r.app_id IS NULL",
+    `SELECT p.key AS perm_key
+       FROM user_role ur
+       JOIN role r ON r.id = ur.role_id
+       JOIN role_permission rp ON rp.role_id = r.id
+       JOIN permission p ON p.id = rp.permission_id
+      WHERE ur.account_id = ? AND (r.app_id = ? OR r.app_id IS NULL)
+     UNION
+     SELECT p.key AS perm_key
+       FROM account_permission ap
+       JOIN permission p ON p.id = ap.permission_id
+      WHERE ap.account_id = ? AND p.app_id = ?`,
   )
-    .bind(aud)
-    .all<{ app_id: string | null; role_key: string; perm_key: string }>();
-  const want = new Set(roles);
-  const perms = new Set<string>();
-  for (const r of rows.results) {
-    if (want.has(r.app_id === null ? r.role_key : `${r.app_id}.${r.role_key}`)) perms.add(r.perm_key);
-  }
-  return [...perms];
+    .bind(accountId, aud, accountId, aud)
+    .all<{ perm_key: string }>();
+  return rows.results.map((r) => r.perm_key);
 }
 
 app.post("/token", async (c) => {
@@ -426,10 +442,14 @@ app.post("/token", async (c) => {
     // 会话吊销联动：发码用的登录会话若已登出，code 随之作废。
     // 兼容桥已停写（登录提速），会话只可能来自 auth 登录/注册，D1 必有行——查无行=非法 session_hash，
     // 按「登录会话已结束」拒绝（过渡期"无行按存活"的口径随 9-21 旧 KV 会话 TTL 归零后收紧）。
-    const sess = await c.env.DB.prepare("SELECT revoked_at, expires_at FROM session WHERE token_hash = ?")
+    const sess = await c.env.DB.prepare(
+      "SELECT s.revoked_at, s.expires_at, a.disabled_at FROM session s JOIN account a ON a.id = s.account_id WHERE s.token_hash = ?",
+    )
       .bind(row.session_hash)
-      .first<{ revoked_at: string | null; expires_at: string }>();
-    if (!sess || sess.revoked_at || sess.expires_at <= nowIso())
+      .first<{ revoked_at: string | null; expires_at: string; disabled_at: string | null }>();
+    // 停用账号（增量 8）在换取 token 这一步也拦一道：停用时会批量吊销会话，但停用与吊销之间
+    // 已在浏览器里发起的换码请求仍可能到达，这里花 0 次额外往返堵住它。
+    if (!sess || sess.revoked_at || sess.expires_at <= nowIso() || sess.disabled_at)
       return oauthJsonError(c, "invalid_grant", "登录会话已结束，请重新登录");
     const user = await loadAccountUser(c, row.account_id);
     if (!user) return oauthJsonError(c, "invalid_grant", "账号不存在");
@@ -474,6 +494,7 @@ app.post("/token", async (c) => {
     }
     const user = await loadAccountUser(c, row.account_id);
     if (!user) return oauthJsonError(c, "invalid_grant", "账号不存在");
+    if (user.disabledAt) return oauthJsonError(c, "invalid_grant", "账号已被停用");
     // 刷新请求的 scope 参数按原 scope 处理（不支持缩窄，避免接入方误传把权限越刷越小）；
     // 刷新签发的 ID token 不带 nonce（OIDC Core §12.2）；沿用原 scope 与轮换族
     const body = await issueTokens(c, {
@@ -510,8 +531,12 @@ app.get("/userinfo", async (c) => {
   if (!user) {
     return c.json({ error: "invalid_token" }, 401, { "WWW-Authenticate": 'Bearer error="invalid_token"' });
   }
+  // 停用账号（增量 8）：token 还在有效期内（access 30 分钟 / refresh 7 天）也必须立刻失去
+  // 角色与权限点——RP 是拿 userinfo 的 roles/permissions 做鉴权的，置空等于当场降权。
+  // 会话列表 / 单会话吊销也已把停用置为拒绝条件，这里是同一判定在 token 通道上的对应实现。
+  const disabled = user.disabledAt !== null;
   // 角色/权限点按 access token 的 aud 过滤，防止跨系统信息泄漏（TECH_DESIGN §6.3）
-  const roles = await rolesForAud(c, user.id, at.aud);
+  const roles = disabled ? [] : await rolesForAud(c, user.id, at.aud);
   const qq = await c.env.DB.prepare(
     "SELECT provider_uid FROM identity WHERE account_id = ? AND provider = 'qq' LIMIT 1",
   )
@@ -521,8 +546,9 @@ app.get("/userinfo", async (c) => {
     sub: String(user.id),
     locked: user.locked,
     must_change_pw: user.mustChangePassword,
+    disabled,
     roles,
-    permissions: await permissionsFor(c, at.aud, roles),
+    permissions: disabled ? [] : await permissionsFor(c, at.aud, user.id),
     qq: qq?.provider_uid ?? null,
   };
   const scopes = at.scope.split(" ");

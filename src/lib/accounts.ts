@@ -8,7 +8,7 @@ import type { AppEnv, Role, SessionUser } from "../env";
  * （鉴权判定走 userinfo 下发的权限点（各 client 的 requirePermission），这里的 role 只服务
  * auth 自身页面的展示。）
  */
-export type AccountUser = SessionUser & { email: string | null };
+export type AccountUser = SessionUser & { email: string | null; disabledAt: string | null };
 
 /** user_role 行 → role 投影（loadAccountUser 与 getSessionUser 共用，口径必须一致）：
  * 全局 superadmin 角色 → 'superadmin'；持有 tour.recorder → 'admin'；否则 'coach'。 */
@@ -20,10 +20,17 @@ export function roleFromRoleRows(rows: { app_id: string | null; role_key: string
 
 export async function loadAccountUser(c: Context<AppEnv>, accountId: number): Promise<AccountUser | null> {
   const account = await c.env.DB.prepare(
-    "SELECT id, name, email, locked, must_change_pw FROM account WHERE id = ?",
+    "SELECT id, name, email, locked, must_change_pw, disabled_at FROM account WHERE id = ?",
   )
     .bind(accountId)
-    .first<{ id: number; name: string; email: string | null; locked: number; must_change_pw: number }>();
+    .first<{
+      id: number;
+      name: string;
+      email: string | null;
+      locked: number;
+      must_change_pw: number;
+      disabled_at: string | null;
+    }>();
   if (!account) return null;
   const roles = await c.env.DB.prepare(
     "SELECT r.app_id AS app_id, r.key AS role_key FROM user_role ur JOIN role r ON r.id = ur.role_id WHERE ur.account_id = ?",
@@ -37,5 +44,6 @@ export async function loadAccountUser(c: Context<AppEnv>, accountId: number): Pr
     role: roleFromRoleRows(roles.results),
     locked: account.locked === 1,
     mustChangePassword: account.must_change_pw === 1,
+    disabledAt: account.disabled_at,
   };
 }
