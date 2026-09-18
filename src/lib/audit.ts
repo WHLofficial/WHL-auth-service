@@ -9,6 +9,8 @@ export type AuditEvent =
   | "register.ok"
   | "register.rate_limited"
   | "pw.change"
+  // 透明重哈希（增量 9）：登录成功后台把低迭代存量哈希升到当前档，凭证变更可审计
+  | "pw.rehash"
   | "logout"
   | "oidc.code_replay"
   | "oidc.refresh_reuse"

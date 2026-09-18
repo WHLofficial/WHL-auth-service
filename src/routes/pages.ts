@@ -4,7 +4,7 @@ import type { Context } from "hono";
 import type { AppEnv } from "../env";
 import { audit } from "../lib/audit";
 import { csrfValid, ensureCsrfToken } from "../lib/csrf";
-import { PBKDF2_ITERATIONS, hashPassword, sha256Hex, verifyPassword } from "../lib/crypto";
+import { PBKDF2_ITERATIONS, hashIterations, hashPassword, sha256Hex, verifyPassword } from "../lib/crypto";
 import { rateLimit, resetRateLimit } from "../lib/ratelimit";
 import { SESSION_COOKIE, createSession, destroySession, revokeSessionAndNotify } from "../lib/session";
 import { clientIp } from "../lib/util";
@@ -146,12 +146,24 @@ app.post("/login", async (c) => {
     return fail(401, "该账号已被停用，请联系管理员");
   }
   const token = await createSession(c, row.id);
+  const storedIters = hashIterations(row.password_hash);
   // 清账号限流 + audit login.ok 都不挡响应：waitUntil 后台（测试无 executionCtx 就地 await）
   await runDetached(
     c,
     (async () => {
       await resetRateLimit(c.env, `login-acct:${name}`);
       await audit(c, "login.ok", { accountId: row.id });
+      // 透明重哈希（TECH_DESIGN §8 第 1 条）：低迭代存量哈希后台升到当前档，legacy 账号
+      // 一次性 +1 写。放后台末位：不挡响应，失败也不影响本次登录，下次登录自然重试
+      if (storedIters !== null && storedIters < PBKDF2_ITERATIONS) {
+        await c.env.DB
+          .prepare(
+            "UPDATE credential SET hash = ?, iterations = ?, updated_at = ? WHERE account_id = ? AND type = 'password'",
+          )
+          .bind(await hashPassword(formValue(form, "password")), PBKDF2_ITERATIONS, new Date().toISOString(), row.id)
+          .run();
+        await audit(c, "pw.rehash", { accountId: row.id, detail: { from: storedIters, to: PBKDF2_ITERATIONS } });
+      }
     })(),
   );
   if (row.must_change_pw === 1) {

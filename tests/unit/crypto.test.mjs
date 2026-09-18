@@ -1,7 +1,7 @@
 // 密码与随机原语：哈希格式、常数时间验密、随机 token / 邀请码字符集。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { PBKDF2_ITERATIONS, generateCode, hashPassword, randomToken, sha256Hex, verifyPassword } from "../../src/lib/crypto.ts";
+import { PBKDF2_ITERATIONS, generateCode, hashIterations, hashPassword, randomToken, sha256Hex, verifyPassword } from "../../src/lib/crypto.ts";
 
 test("PBKDF2 迭代数固定在 25000（TECH_DESIGN 口径）", () => {
   assert.equal(PBKDF2_ITERATIONS, 25_000);
@@ -38,6 +38,16 @@ test("verifyPassword 拒绝错误密码与畸形存档", async () => {
   assert.equal(await verifyPassword("TestPass123", "bcrypt$25000$abcd$efgh"), false, "算法标识不符应拒绝");
   assert.equal(await verifyPassword("TestPass123", "pbkdf2$0$YWJjZGVmZ2hpamtsbW5vcA==$YWJjZA=="), false, "非法迭代数应拒绝");
   assert.equal(await verifyPassword("TestPass123", ""), false);
+});
+
+test("hashIterations 解析存档迭代数，畸形格式返回 null（透明重哈希判档依据）", () => {
+  assert.equal(hashIterations("pbkdf2$25000$AAA$BBB"), 25_000);
+  assert.equal(hashIterations("pbkdf2$1000$AAA$BBB"), 1000);
+  assert.equal(hashIterations("pbkdf2$0$AAA$BBB"), null, "迭代数非法应返回 null");
+  assert.equal(hashIterations("pbkdf2$x$AAA$BBB"), null);
+  assert.equal(hashIterations("bcrypt$25000$AAA$BBB"), null, "算法标识不符应返回 null");
+  assert.equal(hashIterations("pbkdf2$25000$AAA"), null, "字段数不足应返回 null");
+  assert.equal(hashIterations(""), null);
 });
 
 test("randomToken 默认 32 字节 → base64url，无 padding 与 +/", () => {

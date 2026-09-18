@@ -37,13 +37,21 @@ export async function hashPassword(password: string): Promise<string> {
   return `pbkdf2$${PBKDF2_ITERATIONS}$${toB64(salt)}$${toB64(await derive(password, salt, PBKDF2_ITERATIONS))}`;
 }
 
-export async function verifyPassword(password: string, stored: string): Promise<boolean> {
+/** 从存量哈希解析迭代数；格式不符返回 null。透明重哈希据此判断是否要升档 */
+export function hashIterations(stored: string): number | null {
   const parts = stored.split("$");
-  if (parts.length !== 4 || parts[0] !== "pbkdf2") return false;
+  if (parts.length !== 4 || parts[0] !== "pbkdf2") return null;
   const iterations = Number(parts[1]);
-  if (!Number.isInteger(iterations) || iterations <= 0) return false;
-  const expected = fromB64(parts[3]);
-  const actual = await derive(password, fromB64(parts[2]), iterations);
+  if (!Number.isInteger(iterations) || iterations <= 0) return null;
+  return iterations;
+}
+
+export async function verifyPassword(password: string, stored: string): Promise<boolean> {
+  const iterations = hashIterations(stored);
+  if (iterations === null) return false;
+  const [, , saltB64, hashB64] = stored.split("$");
+  const expected = fromB64(hashB64);
+  const actual = await derive(password, fromB64(saltB64), iterations);
   if (actual.length !== expected.length) return false;
   // 常数时间比较，防时序侧信道
   let diff = 0;

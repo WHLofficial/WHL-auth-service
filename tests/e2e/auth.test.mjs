@@ -3,6 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Client } from "../lib/client.mjs";
 import * as H from "../lib/harness.mjs";
+import { verifyPassword } from "../../src/lib/crypto.ts";
 
 const PW = "TestPass123";
 const anon = () => new Client(H.BASE);
@@ -200,4 +201,53 @@ test("注册码名额：同名并发注册只消耗成功那一次（F-F）", as
 
   const after = H.sql(`SELECT used_count FROM signup_code WHERE code_hash = '${codeHash}';`)[0].used_count;
   assert.equal(after - before, 1, `只有建号成功那次可以消耗名额（失败侧必须退还），实际 +${after - before}`);
+});
+
+// —— 透明重哈希（增量 9，TECH_DESIGN §8 第 1 条）——
+
+/** 按指定迭代数造一份与产品同格式的存档哈希（Node 与 workerd 的 WebCrypto PBKDF2 同为原生实现） */
+async function legacyHash(password, iterations) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations }, key, 256);
+  const b64 = (b) => btoa(String.fromCharCode(...new Uint8Array(b)));
+  return `pbkdf2$${iterations}$${b64(salt)}$${b64(bits)}`;
+}
+
+test("透明重哈希：低迭代存量登录成功后后台升到当前档并写 pw.rehash 审计", async () => {
+  const { name } = await freshUser("rehash");
+  const accountId = H.sql(`SELECT id FROM account WHERE name = '${name}';`)[0].id;
+
+  // 模拟收口迁移来的低迭代存量哈希
+  H.sqlExec(
+    `UPDATE credential SET hash = '${await legacyHash(PW, 1000)}', iterations = 1000 ` +
+      `WHERE account_id = ${accountId} AND type = 'password';`,
+  );
+  assert.ok(
+    H.sql(`SELECT hash FROM credential WHERE account_id = ${accountId} AND type = 'password';`)[0].hash.startsWith("pbkdf2$1000$"),
+    "低迭代存档应已播种",
+  );
+
+  // 低迭代账号可正常登录（verifyPassword 按存档迭代数验）；用新 Client——原 client 已带注册
+  // 会话，GET /login 会 303 拿不到 CSRF（测试环境已知坑），新 Client 同时是新 IP 不污染账号桶
+  const r = await H.signIn(new Client(H.BASE), name, PW);
+  assert.equal(r.status, 303, `低迭代账号应能登录，实际 ${r.status}`);
+
+  // 后台重哈希：升到当前档 + pw.rehash 审计（runDetached 异步，轮询等待）
+  const upgraded = await H.waitFor(() => {
+    const row = H.sql(`SELECT hash, iterations FROM credential WHERE account_id = ${accountId} AND type = 'password';`)[0];
+    return row && row.iterations === 25_000 ? row : null;
+  });
+  assert.ok(upgraded, "登录成功后凭证应被后台重哈希到当前档");
+  assert.equal(await verifyPassword(PW, upgraded.hash), true, "升级后的哈希应仍验得过大密码");
+
+  const audited = await H.waitFor(
+    () => H.sql(`SELECT detail FROM audit_log WHERE account_id = ${accountId} AND event = 'pw.rehash';`)[0] || null,
+  );
+  assert.ok(audited, "重哈希应写 pw.rehash 审计");
+  assert.equal(JSON.parse(audited.detail).from, 1000, "审计应记录升档前的迭代数");
+
+  // 升级后换个新客户端再登录，全链路无损
+  const again = new Client(H.BASE);
+  assert.equal((await H.signIn(again, name, PW)).status, 303, "升级后应能继续正常登录");
 });

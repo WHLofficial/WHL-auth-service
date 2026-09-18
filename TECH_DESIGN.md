@@ -357,7 +357,7 @@ userinfo 按 access token 的 `aud` 只返回**该 client 的**角色与权限�
 
 | # | 项 | 方案 |
 |---|-----|------|
-| 1 | **密码哈希** | PBKDF2-SHA256 原格式直迁（25000 迭代，验密零阻力、常数时间比较）；登录成功透明重哈希升级迭代数。约束：Free 档 CPU 上限 10ms/请求（[已核实](https://developers.cloudflare.com/workers/platform/limits/#cpu-time)），25k→50k 需本地压测确认；开 Paid 可上 300k+（可选加固）。管理员重置密码流程沿用（临时密码 + must_change_pw）。**现状（2026-09-18）：透明重哈希升级与 25k→50k 压测均未实现**——`src/lib/crypto.ts` 迭代数 25_000，`verifyPassword` 只用存档里的迭代数，登录路径无重哈希回写；留作后续增量（与迭代数决策一起做） |
+| 1 | **密码哈希** | PBKDF2-SHA256 原格式直迁（25000 迭代，验密零阻力、常数时间比较）；登录成功透明重哈希升级迭代数。约束：Free 档 CPU 上限 10ms/请求（[已核实](https://developers.cloudflare.com/workers/platform/limits/#cpu-time)），25k→50k 需本地压测确认；开 Paid 可上 300k+（可选加固）。管理员重置密码流程沿用（临时密码 + must_change_pw）。**现状（2026-09-18，增量 9）：透明重哈希已实现**——登录成功后台把低迭代存量哈希升到当前档（`src/routes/pages.ts`，waitUntil 不挡响应；legacy 账号一次性 +1 写，审计 `pw.rehash`）；迭代数决策见 §12 假设 5，保持 25k |
 | 2 | **会话固定** | 登录成功必发 256bit 新随机 token，不复用任何登录前值；OIDC code 一次性、≤60s、绑定 client+redirect_uri+PKCE challenge |
 | 3 | **CSRF** | client 侧 state+nonce（httpOnly cookie 存储校验）+ PKCE 强制；auth 表单 POST 带 CSRF token；cookie 延续 SameSite=Lax；redirect_uri 精确匹配 |
 | 4 | **防暴力破解** | 沿用 KV 固定窗口限流模式（登录 IP 10/15min + 账号 5/15min；注册 IP 5/h；绑定码限速）；命中写 audit_log；auth 用自己的 KV namespace，键前缀与现有 `rl:` 约定隔离 |
@@ -455,7 +455,7 @@ sequenceDiagram
 | 2 | tour.whleague.win 的 CF 质询页对浏览器用户透明，且 auth 域名可不启挑战 | OIDC 跳转链路 | 部署清单项，上线前实测 |
 | 3 | club 域名按 club.whleague.win 规划 | 首次部署 | 已与需求方确认未上线 |
 | 4 | `jose` 在 Workers 的 RS256 签名性能满足 ≤50 用户量级 | token 签发 | 社区通行实践，未单独压测 |
-| 5 | PBKDF2 25k→50k 迭代在 Free 档 10ms CPU 内可行 | 哈希升级幅度 | 需本地压测确认 |
+| 5 | PBKDF2 25k→50k 迭代在 Free 档 10ms CPU 内可行 | 哈希升级幅度 | **已压测证伪（2026-09-18，增量 9）**：`scripts/bench-pbkdf2.mjs` 原生 WebCrypto 实测 25k 中位 10.0ms / 50k 中位 18.0ms（近线性翻倍），25k 已贴 Free 档 10ms CPU 上限，50k 必超。决策：保持 25k，存量一致性交给登录成功透明重哈希；上 Paid（CPU 上限放宽）再议提档 |
 | 6 | 插件生产配置（sync_secret 实值等）只在腾讯云服务器，本机为开发副本 | 插件改造部署 | 探查确认，部署时注意 |
 
 ## 13. 来源
