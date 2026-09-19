@@ -2,13 +2,21 @@ import { Hono } from "hono";
 import { getCookie } from "hono/cookie";
 import type { Context } from "hono";
 import type { AppEnv } from "../env";
-import { audit } from "../lib/audit";
+import { audit, auditStatement } from "../lib/audit";
 import { csrfValid, ensureCsrfToken } from "../lib/csrf";
 import { PBKDF2_ITERATIONS, hashIterations, hashPassword, sha256Hex, verifyPassword } from "../lib/crypto";
 import { rateLimit, resetRateLimit } from "../lib/ratelimit";
-import { SESSION_COOKIE, createSession, destroySession, revokeSessionAndNotify } from "../lib/session";
-import { clientIp } from "../lib/util";
-import { bindPage, homePage, loginPage, passwordPage, registerPage } from "../web/pages";
+import {
+  SESSION_COOKIE,
+  createSession,
+  destroySession,
+  notifyBackchannel,
+  revokeSessionAndNotify,
+  sessionRevokeStatements,
+  sessionsOfAccount,
+} from "../lib/session";
+import { clientIp, nowIso } from "../lib/util";
+import { bindPage, homePage, loginPage, passwordPage, registerPage, sessionsPage } from "../web/pages";
 import { issueCode, parseAuthorize, runDetached } from "./oidc";
 
 const app = new Hono<AppEnv>();
@@ -419,6 +427,126 @@ app.post("/bind/code", async (c) => {
     .bind(await sha256Hex(code), user.id, now.toISOString(), new Date(now.getTime() + 600_000).toISOString())
     .run();
   return render({ code });
+});
+
+// ---------- 会话管理（增量 10，PRD P1-2）：用户自助查看与下线自己的会话 ----------
+// 管理员能力（任意账号强制下线）在 /api/admin/sessions/revoke（增量 8）；这里只服务本人，
+// 所有写入都带 account_id 条件（sessionRevokeStatements 内建），审计与吊销同 batch。
+
+const SESSIONS_LIMIT = 50;
+
+type SessionRow = { hash: string; current: boolean; ip: string | null; createdAt: string; lastSeenAt: string | null; expiresAt: string };
+
+async function listOwnSessions(c: Context<AppEnv>, accountId: number, currentHash: string | null): Promise<SessionRow[]> {
+  const rows = (
+    await c.env.DB.prepare(
+      `SELECT token_hash, ip, created_at, last_seen_at, expires_at FROM session
+        WHERE account_id = ? AND revoked_at IS NULL AND expires_at > ?
+        ORDER BY created_at DESC LIMIT ?`,
+    )
+      .bind(accountId, nowIso(), SESSIONS_LIMIT)
+      .all<{ token_hash: string; ip: string | null; created_at: string; last_seen_at: string | null; expires_at: string }>()
+  ).results;
+  return rows.map((r) => ({
+    hash: r.token_hash,
+    current: r.token_hash === currentHash,
+    ip: r.ip,
+    createdAt: r.created_at,
+    lastSeenAt: r.last_seen_at,
+    expiresAt: r.expires_at,
+  }));
+}
+
+app.get("/sessions", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.redirect(`/login?next=${encodeURIComponent("/sessions")}`, 303);
+  const token = getCookie(c, SESSION_COOKIE);
+  const currentHash = token ? await sha256Hex(token) : null;
+  return c.html(sessionsPage({ csrf: await ensureCsrfToken(c), sessions: await listOwnSessions(c, user.id, currentHash) }));
+});
+
+app.post("/sessions/revoke", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.redirect("/login", 303);
+  const form = (await c.req.parseBody().catch(() => ({}))) as Form;
+  const render = async (opts: { notice?: string; error?: string }, status = 200) => {
+    const token = getCookie(c, SESSION_COOKIE);
+    const currentHash = token ? await sha256Hex(token) : null;
+    return c.html(
+      sessionsPage({ csrf: await ensureCsrfToken(c), sessions: await listOwnSessions(c, user.id, currentHash), ...opts }),
+      status as 200 | 400 | 403 | 404 | 429,
+    );
+  };
+  if (!csrfValid(c, form.csrf)) return render({ error: CSRF_EXPIRED }, 403);
+  if (!(await rateLimit(c.env, `sessions-revoke:${user.id}`, 20, 900))) {
+    return render({ error: "操作太频繁，请 15 分钟后再来" }, 429);
+  }
+  const sessionHash = formValue(form, "session");
+  if (!sessionHash) return render({ error: "缺少会话标识" }, 400);
+  // 先确认行存在再写：会话已自然结束时不留下无效的 session.revoke 审计（与 admin 端点同口径）
+  const exists = await c.env.DB.prepare(
+    "SELECT 1 AS ok FROM session WHERE token_hash = ? AND account_id = ? AND revoked_at IS NULL",
+  )
+    .bind(sessionHash, user.id)
+    .first<{ ok: number }>();
+  if (!exists) return render({ error: "会话不存在或已结束" }, 404);
+  await c.env.DB.batch([
+    ...sessionRevokeStatements(c, sessionHash, user.id, nowIso()),
+    auditStatement(c, "session.revoke", {
+      accountId: user.id,
+      detail: { scope: "one", self: true, sid: sessionHash.slice(0, 12) },
+    }),
+  ]);
+  const clients = await c.env.DB.prepare("SELECT DISTINCT client_id FROM oidc_refresh WHERE session_hash = ?")
+    .bind(sessionHash)
+    .all<{ client_id: string }>();
+  await notifyBackchannel(
+    c,
+    clients.results.map((r) => ({ sub: String(user.id), sid: sessionHash, clientId: r.client_id })),
+  );
+  // 下线的正是当前设备 → 会话已失效，清 cookie 送回登录页
+  const token = getCookie(c, SESSION_COOKIE);
+  if (token && (await sha256Hex(token)) === sessionHash) {
+    await destroySession(c);
+    return c.redirect("/login", 303);
+  }
+  return render({ notice: "该设备已下线" });
+});
+
+app.post("/sessions/revoke-others", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.redirect("/login", 303);
+  const form = (await c.req.parseBody().catch(() => ({}))) as Form;
+  const render = async (opts: { notice?: string; error?: string }, status = 200) => {
+    const token = getCookie(c, SESSION_COOKIE);
+    const currentHash = token ? await sha256Hex(token) : null;
+    return c.html(
+      sessionsPage({ csrf: await ensureCsrfToken(c), sessions: await listOwnSessions(c, user.id, currentHash), ...opts }),
+      status as 200 | 400 | 403 | 429,
+    );
+  };
+  if (!csrfValid(c, form.csrf)) return render({ error: CSRF_EXPIRED }, 403);
+  if (!(await rateLimit(c.env, `sessions-revoke:${user.id}`, 20, 900))) {
+    return render({ error: "操作太频繁，请 15 分钟后再来" }, 429);
+  }
+  const token = getCookie(c, SESSION_COOKIE);
+  const currentHash = token ? await sha256Hex(token) : null;
+  const bySession = await sessionsOfAccount(c, user.id);
+  const others = [...bySession.keys()].filter((h) => h !== currentHash);
+  if (others.length === 0) return render({ notice: "没有其他活跃会话" });
+  const now = nowIso();
+  await c.env.DB.batch([
+    ...others.flatMap((h) => sessionRevokeStatements(c, h, user.id, now)),
+    auditStatement(c, "session.revoke", {
+      accountId: user.id,
+      detail: { scope: "others", self: true, count: others.length },
+    }),
+  ]);
+  await notifyBackchannel(
+    c,
+    others.flatMap((sid) => (bySession.get(sid) ?? []).map((clientId) => ({ sub: String(user.id), sid, clientId }))),
+  );
+  return render({ notice: `已下线 ${others.length} 台设备` });
 });
 
 app.post("/logout", async (c) => {

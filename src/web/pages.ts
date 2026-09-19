@@ -103,6 +103,7 @@ ${u.mustChangePassword ? `<p class="notice">密码刚被重置，请先<a href="
 ${u.locked ? `<div class="kv"><dt>账号状态</dt><dd>受限（观众号），解锁前不能绑队</dd></div>` : ""}
 </dl>
 <a class="btn2" href="/password">改密码</a>
+<a class="btn2" href="/sessions">会话管理</a>
 <form method="post" action="/logout">
 <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
 <button type="submit" class="btn2">登出</button>
@@ -143,6 +144,55 @@ ${opts.boundAt ? `<div class="kv"><dt>绑定时间</dt><dd>${esc(opts.boundAt)}<
     "QQ 绑定",
     `${opts.error ? `<p class="msg">${esc(opts.error)}</p>` : ""}
 ${boundBox}
+<p class="foot"><a href="/">返回我的账号</a></p>`,
+  );
+}
+
+/** ISO 时间串 → 「YYYY-MM-DD HH:MM UTC」（服务端时间是 UTC，直接截取避免再引入时区依赖） */
+function fmtTime(iso: string | null): string {
+  return iso ? `${iso.slice(0, 16).replace("T", " ")} UTC` : "—";
+}
+
+/** 会话管理页（增量 10，PRD P1-2）：用户自助查看自己的活跃会话并单个下线。
+ *  只列自己的会话、只有下线动作；管理员能力（任意账号强制下线）在 tour 管理台走机器端点。 */
+export function sessionsPage(opts: {
+  csrf: string;
+  sessions: { hash: string; current: boolean; ip: string | null; createdAt: string; lastSeenAt: string | null; expiresAt: string }[];
+  notice?: string;
+  error?: string;
+}): string {
+  const cards = opts.sessions
+    .map((s) => {
+      const head = s.current ? `<div class="kv"><dt>当前设备</dt><dd>本机</dd></div>\n` : "";
+      const revoke = s.current
+        ? ""
+        : `<form method="post" action="/sessions/revoke">
+<input type="hidden" name="csrf" value="${esc(opts.csrf)}">
+<input type="hidden" name="session" value="${esc(s.hash)}">
+<button type="submit" class="btn2">下线此设备</button>
+</form>`;
+      return `<dl>
+${head}<div class="kv"><dt>登录时间</dt><dd>${esc(fmtTime(s.createdAt))}</dd></div>
+<div class="kv"><dt>最后活跃</dt><dd>${esc(fmtTime(s.lastSeenAt))}</dd></div>
+<div class="kv"><dt>来源 IP</dt><dd>${s.ip ? esc(s.ip) : "未知"}</dd></div>
+<div class="kv"><dt>过期时间</dt><dd>${esc(fmtTime(s.expiresAt))}</dd></div>
+</dl>
+${revoke}`;
+    })
+    .join("\n");
+  const others = opts.sessions.length > 1
+    ? `<form method="post" action="/sessions/revoke-others">
+<input type="hidden" name="csrf" value="${esc(opts.csrf)}">
+<button type="submit" class="btn2">下线其他设备（保留本机）</button>
+</form>`
+    : "";
+  return page(
+    "会话管理",
+    `<p class="sub">这些设备正登录着你的账号。被下线的设备下次访问会要求重新登录。</p>
+${opts.notice ? `<p class="notice">${esc(opts.notice)}</p>` : ""}
+${opts.error ? `<p class="msg">${esc(opts.error)}</p>` : ""}
+${cards}
+${others}
 <p class="foot"><a href="/">返回我的账号</a></p>`,
   );
 }
