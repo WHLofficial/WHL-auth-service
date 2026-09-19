@@ -72,7 +72,7 @@ WHL 生态现有三个系统（赛事平台 tour.whleague.win、竞猜系统 gue
 | P1-1 | auth 管理台 | 账号列表 / 重置密码（生成临时密码 + must_change_pw）/ 解锁 / 角色授权编辑 / 注册码生成——接管 tour admin 的账号管理职能（真源收口的前置条件）。**增量 8 已落地能力层**：auth 新增 12 条 HMAC 管理机器端点（`/api/admin/*`），tour 管理台（`src/pages/Accounts.tsx`、`AdminCodes.tsx`）改为转发调用，原先 6 处写自己 user 表的死写全部改道；界面仍在 tour，auth 原生界面未做 |
 | P1-2 | 用户自助会话管理 | 查看自己的活跃会话（设备/时间），单个吊销。**增量 8 落地管理侧、增量 10 落地自助侧（已完成）**：auth 原生 `/sessions` 页列出自己的活跃会话（IP / 登录时间 / 最后活跃 / 过期 / 当前设备标记），支持单个下线与「下线其他设备」（保留本机）；吊销与审计同 batch、联动 refresh 吊销与 back-channel 通知 |
 | P1-3 | audit_log 查询界面 | 按账号/事件类型/时间筛选。**增量 10 已完成**：auth 新增 `POST /api/admin/audit/query`（id 倒序游标分页、单批 ≤100、0010 补 idx_audit_event），界面在 tour 管理后台 `/admin/audit`（超管专属，P1-1 既定「界面在 tour」） |
-| P1-4 | 换绑 UX 完善 | auth 页面发起解绑 → QQ 确认指令的完整双向流程与提示。未做（QQ 侧「解绑」指令已在插件落地，缺 auth 页发起这一半） |
+| P1-4 | 换绑 UX 完善 | auth 页面发起解绑 → QQ 确认指令的完整双向流程与提示。**增量 11 已完成**：绑定页「解绑此 QQ」生成 6 位一次性解绑确认码（bind_code 加 kind 列，10 分钟）→ 绑定 QQ 在群发「解绑 <码>」→ 插件经 `POST /api/identity/unbind/confirm` 三重校验核销（码/QQ/账号归属一致）；群里无码「解绑」直解老路保留，审计以 detail.via 区分 qq_direct / web_confirm |
 
 ### P2（本期砍掉，预留扩展位）
 

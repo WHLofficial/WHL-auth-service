@@ -112,24 +112,33 @@ ${SYSTEM_LINKS.map((s) => `<a class="jump ${s.cls}"${s.hidden ? " hidden" : ""} 
   );
 }
 
-/** QQ 绑定页（P0-8）：生成一次性码 → QQ 群「绑定 <码>」由插件核销；解绑在 QQ 群发「解绑」 */
+/** QQ 绑定页（P0-8）：生成一次性码 → QQ 群「绑定 <码>」由插件核销。
+ *  解绑（增量 11，P1-4）：网页发起 → 生成解绑确认码 → QQ 群「解绑 <码>」核销；
+ *  也可以不发起，直接在群里发「解绑」（老路保留）。换绑 = 解绑确认后回来生成新绑定码。 */
 export function bindPage(opts: {
   csrf: string;
   qq: string | null;
   boundAt: string | null;
   code?: string;
+  unbindCode?: string;
   error?: string;
 }): string {
   const boundBox = opts.qq
-    ? `<dl>
+    ? opts.unbindCode
+      ? `<p class="sub">在已绑定 QQ（${esc(opts.qq)}）的群聊里发送下面这条消息，确认解绑：</p>
+<p class="center"><code class="kbd">解绑 ${esc(opts.unbindCode)}</code></p>
+<p class="hint">10 分钟内有效，一次一用；机器人回复确认即解绑成功，积分余额不受影响。
+解绑后回到本页生成新绑定码，即可换绑。</p>`
+      : `<dl>
 <div class="kv"><dt>已绑定 QQ</dt><dd>${esc(opts.qq)}</dd></div>
 ${opts.boundAt ? `<div class="kv"><dt>绑定时间</dt><dd>${esc(opts.boundAt)}</dd></div>` : ""}
 </dl>
-<p class="hint">解绑请在本 QQ 的群聊里发送「解绑」；换绑 = 解绑后重新生成绑定码。解绑、换绑不影响积分余额。</p>
-<form method="post" action="/bind/code">
+<p class="hint">换绑 = 先解绑，确认后回来生成新绑定码。解绑、换绑不影响积分余额。</p>
+<form method="post" action="/bind/unbind">
 <input type="hidden" name="csrf" value="${esc(opts.csrf)}">
-<button type="submit" class="btn2">重新生成绑定码</button>
-</form>`
+<button type="submit" class="btn2">解绑此 QQ</button>
+</form>
+<p class="hint">点上面按钮后，去本 QQ 的群聊发送「解绑 码」完成确认；不经过网页直接发「解绑」也可以。</p>`
     : opts.code
       ? `<p class="sub">在 QQ 群里发送下面这条消息：</p>
 <p class="center"><code class="kbd">绑定 ${esc(opts.code)}</code></p>

@@ -1,7 +1,9 @@
 // 机器端点（P0-8 / 增量 7）：无 cookie 的 HMAC 通道。
 // QQ 绑定（积分插件 ↔ auth）：POST /api/bind/claim {code, qq_id} → 200 {ok, displayName}；
-//   POST /api/identity/unbind {qq_id}。业务错误 400 {error, message}
-//   （invalid_code / qq_bound / user_bound / not_bound），验签失败 401。
+//   POST /api/identity/unbind {qq_id}（QQ 群直接发「解绑」，via=qq_direct）、
+//   POST /api/identity/unbind/confirm {code, qq_id}（网页发起 → QQ 持码确认，增量 11）。
+//   业务错误 400 {error, message}
+//   （invalid_code / qq_bound / user_bound / not_bound / code_mismatch），验签失败 401。
 // 球队绑定（增量 7，tour/club 双入口）：绑定关系唯一真源在本库，双方经只读 AUTH_DB 派生——
 //   /api/team/bindcode 发码、/api/team/bind 烧码（写绑定+烧码+审计同 batch，杜绝撕裂写）、
 //   /api/team/unbind 解绑、/api/team/register 目录 upsert、/api/team/link 俱乐部关联。
@@ -37,7 +39,7 @@ app.post("/api/bind/claim", async (c) => {
 
   const now = nowIso();
   const row = await c.env.DB.prepare(
-    "SELECT code_hash, account_id FROM bind_code WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?",
+    "SELECT code_hash, account_id FROM bind_code WHERE code_hash = ? AND kind = 'bind' AND used_at IS NULL AND expires_at > ?",
   )
     .bind(await sha256Hex(code), now)
     .first<{ code_hash: string; account_id: number }>();
@@ -98,9 +100,59 @@ app.post("/api/identity/unbind", async (c) => {
     c.env.DB.prepare("DELETE FROM identity WHERE id = ?").bind(row.id),
     c.env.DB.prepare(
       "INSERT INTO audit_log (account_id, event, detail, ip, created_at) VALUES (?, 'bind.unbind', ?, ?, ?)",
-    ).bind(row.account_id, JSON.stringify({ qq }), clientIp(c), now),
+    ).bind(row.account_id, JSON.stringify({ qq, via: "qq_direct" }), clientIp(c), now),
   ]);
   return c.json({ ok: true, displayName: (await displayNameOf(c, row.account_id)) ?? "" });
+});
+
+// 解绑确认码核销（增量 11，P1-4）：网页 /bind/unbind 发起 → QQ 群「解绑 <码>」→
+// 插件调本端点。三重校验后删绑定：码有效（kind='unbind'、未用未过期）+ 该 QQ 确有绑定 +
+// 码归属账号与该 QQ 绑定的账号一致（防拿自己的码解别人的绑定）。
+// 删 identity、核销码、审计三句同 batch；审计 detail.via 与 QQ 直接解绑（qq_direct）区分。
+app.post("/api/identity/unbind/confirm", async (c) => {
+  const gate = await machineGate(c);
+  if ("err" in gate) return gate.err;
+  const body = parseJson(gate.raw);
+  if (!body) return c.json({ error: "bad body", message: "请求体不是合法 JSON" }, 400);
+  const code = str(body.code);
+  const qq = str(body.qq_id);
+  if (!code || !qq) return c.json({ error: "bad body", message: "缺少 code 或 qq_id" }, 400);
+  if (!/^\d{5,20}$/.test(qq)) return c.json({ error: "bad body", message: "qq_id 格式不对" }, 400);
+
+  const now = nowIso();
+  const codeHash = await sha256Hex(code);
+  const codeRow = await c.env.DB.prepare(
+    "SELECT account_id FROM bind_code WHERE code_hash = ? AND kind = 'unbind' AND used_at IS NULL AND expires_at > ?",
+  )
+    .bind(codeHash, now)
+    .first<{ account_id: number }>();
+  if (!codeRow) return c.json({ error: "invalid_code", message: "解绑码无效或已过期，请在认证中心网页重新发起" }, 400);
+
+  const binding = await c.env.DB.prepare(
+    "SELECT id, account_id FROM identity WHERE provider = 'qq' AND provider_uid = ?",
+  )
+    .bind(qq)
+    .first<{ id: number; account_id: number }>();
+  if (!binding) return c.json({ error: "not_bound", message: "该 QQ 未绑定过账号" }, 400);
+  if (binding.account_id !== codeRow.account_id) {
+    return c.json({ error: "code_mismatch", message: "解绑码与该 QQ 绑定的账号不一致" }, 400);
+  }
+
+  // 以码未用为条件核销（同增量 7 烧码竞速修法）：同码两路并发只赢一路，
+  // 输家 changes=0 整批零写回、按无效码回应，不产生重复审计
+  const results = await c.env.DB.batch([
+    c.env.DB.prepare(
+      "UPDATE bind_code SET used_at = ? WHERE code_hash = ? AND kind = 'unbind' AND used_at IS NULL",
+    ).bind(now, codeHash),
+    c.env.DB.prepare("DELETE FROM identity WHERE id = ? AND account_id = ?").bind(binding.id, binding.account_id),
+    c.env.DB.prepare(
+      "INSERT INTO audit_log (account_id, event, detail, ip, created_at) VALUES (?, 'bind.unbind', ?, ?, ?)",
+    ).bind(binding.account_id, JSON.stringify({ qq, via: "web_confirm" }), clientIp(c), now),
+  ]);
+  if ((results[0].meta.changes ?? 0) !== 1) {
+    return c.json({ error: "invalid_code", message: "解绑码无效或已过期，请在认证中心网页重新发起" }, 400);
+  }
+  return c.json({ ok: true, displayName: (await displayNameOf(c, binding.account_id)) ?? "" });
 });
 
 // ---------- 球队绑定（增量 7：tour/club 双入口，真源在本库） ----------

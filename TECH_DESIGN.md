@@ -332,6 +332,7 @@ userinfo 按 access token 的 `aud` 只返回**该 client 的**角色与权限�
 
 - **绑定**：登录 auth → 绑定页生成 6 位一次性码（10 分钟、一码一用）→ 用户在 QQ 群发「绑定 <码>」→ 插件 HMAC 签名调 `POST auth/api/bind/claim {code, qq_id}` → 校验后写 `identity(provider='qq')` → 回执 `{ok, displayName}`。
 - **解绑**：QQ 群发「/解绑」→ 插件验证发起者 QQ 当前有绑定 → 调 `POST auth/api/identity/unbind {qq_id}`（HMAC）→ 删 identity。auth 页面发起的解绑（P1）需 QQ 侧确认指令，防页面被他人操作。
+- **解绑确认码（增量 11 落地，PRD P1-4）**：绑定页点「解绑此 QQ」→ 生成 6 位一次性解绑确认码（复用 `bind_code` 表，0011 迁移加 `kind` 列区分 `'bind'`/`'unbind'`，10 分钟）→ 用户在绑定 QQ 的群发「解绑 <码>」→ 插件调 `POST auth/api/identity/unbind/confirm {code, qq_id}`（HMAC）→ 三重校验（码有效、该 QQ 确有绑定、码归属账号与绑定账号一致）→ 删 identity + 核销码 + 审计同 batch。两类码互相不可串用（查询带 kind 条件）；群里无码「解绑」老路保留。审计 `bind.unbind` 的 `detail.via` 区分 `qq_direct` / `web_confirm`。
 - **换绑** = 解绑 + 重新绑定，同两条流程串联。
 - **积分影响**：积分真源在插件侧、主键 QQ 号，解绑/换绑只解除「QQ↔账号」关联，积分余额不动（写进用户提示）。
 

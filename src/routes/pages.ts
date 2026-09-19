@@ -422,11 +422,43 @@ app.post("/bind/code", async (c) => {
   await c.env.DB.prepare("DELETE FROM bind_code WHERE account_id = ? AND used_at IS NULL").bind(user.id).run();
   const code = sixDigitCode();
   await c.env.DB.prepare(
-    "INSERT INTO bind_code (code_hash, account_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+    "INSERT INTO bind_code (code_hash, account_id, kind, created_at, expires_at) VALUES (?, ?, 'bind', ?, ?)",
   )
     .bind(await sha256Hex(code), user.id, now.toISOString(), new Date(now.getTime() + 600_000).toISOString())
     .run();
   return render({ code });
+});
+
+// 发起解绑（增量 11，PRD P1-4）：生成解绑确认码，QQ 群「解绑 <码>」由插件经
+// /api/identity/unbind/confirm 核销（核销时校验码归属账号与该 QQ 的绑定一致）。
+// 不在网页直接删 identity：绑定变更必须证明 QQ 持有（PRD P0-8 既定口径）。
+app.post("/bind/unbind", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.redirect("/login", 303);
+  const form = (await c.req.parseBody().catch(() => ({}))) as Form;
+  const render = async (opts: { unbindCode?: string; error?: string }, status: 200 | 400 | 403 | 429 = 200) => {
+    const binding = await qqBindingOf(c, user.id);
+    return c.html(
+      bindPage({ csrf: await ensureCsrfToken(c), qq: binding?.provider_uid ?? null, boundAt: binding?.bound_at ?? null, ...opts }),
+      status,
+    );
+  };
+  if (!csrfValid(c, form.csrf)) return render({ error: CSRF_EXPIRED }, 403);
+  if (!(await rateLimit(c.env, `bind-unbind:${user.id}`, 5, 900))) {
+    return render({ error: "操作太频繁，请 15 分钟后再来" }, 429);
+  }
+  const binding = await qqBindingOf(c, user.id);
+  if (!binding) return render({ error: "该账号未绑定 QQ" }, 400);
+  const now = new Date();
+  // 一号一码：新解绑码发出即作废同账号旧码（含未用的绑定码，两态互斥防混用）
+  await c.env.DB.prepare("DELETE FROM bind_code WHERE account_id = ? AND used_at IS NULL").bind(user.id).run();
+  const code = sixDigitCode();
+  await c.env.DB.prepare(
+    "INSERT INTO bind_code (code_hash, account_id, kind, created_at, expires_at) VALUES (?, ?, 'unbind', ?, ?)",
+  )
+    .bind(await sha256Hex(code), user.id, now.toISOString(), new Date(now.getTime() + 600_000).toISOString())
+    .run();
+  return render({ unbindCode: code });
 });
 
 // ---------- 会话管理（增量 10，PRD P1-2）：用户自助查看与下线自己的会话 ----------
