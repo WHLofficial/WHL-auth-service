@@ -156,14 +156,18 @@ test("机器门：无签名 / 伪签名 / 跨路径签名一律 401，非法 JSO
   assert.equal(badJson.json.error, "bad body");
 });
 
-test("目录：3 个接入系统、8 个角色、17 个权限点（权限点键已是全键名）", { skip: SKIP }, async () => {
+test("目录：3 个接入系统、7 个角色、16 个权限点（0010 删除死点 tour.team.bindcode.issue）", { skip: SKIP }, async () => {
   const { status, json } = await admin(machineClient(), "/api/admin/catalog", {});
   assert.equal(status, 200);
   const clients = json.apps.map((a) => a.client_id);
   for (const id of ["tour", "guess", "club"]) assert.ok(clients.includes(id), `目录应有 ${id}`);
 
   assert.equal(json.roles.length, 7, `角色应 7 个（1 全局 + tour/guess/club 各 2），实际 ${json.roles.length}`);
-  assert.equal(json.permissions.length, 17, `权限点应 17 个，实际 ${json.permissions.length}`);
+  assert.equal(json.permissions.length, 16, `权限点应 16 个，实际 ${json.permissions.length}`);
+  assert.ok(
+    !json.permissions.some((p) => p.key === "tour.team.bindcode.issue"),
+    "死权限点 tour.team.bindcode.issue 应已被 0010 删除",
+  );
 
   const superRole = json.roles.find((r) => r.app_id === null && r.key === "superadmin");
   assert.ok(superRole, "应有全局超管角色");
@@ -175,7 +179,7 @@ test("目录：3 个接入系统、8 个角色、17 个权限点（权限点键�
 
   // 角色→权限点映射：界面据它算「角色带来的权限」与「额外授予」的并集，不能为空
   const superPermIds = json.role_permissions.filter((rp) => rp.role_id === superRole.id);
-  assert.equal(superPermIds.length, 17, "全局超管经 CROSS JOIN 应持全部 17 个权限点");
+  assert.equal(superPermIds.length, 16, "全局超管经 CROSS JOIN 应持全部 16 个权限点");
   assert.ok(
     json.role_permissions.some((rp) => rp.role_id !== superRole.id),
     "非全局角色也应有权限点映射（tour.recorder / club.admin 等）",
@@ -560,4 +564,63 @@ test("身份查询（增量 9B）：批量返回 qq 映射、未绑定不出现�
       { account_id: u2.id, qq_id: "qq-lookup-222", bound_at: now },
     ],
   });
+});
+
+test("审计查询（增量 10）：筛选 account/event/时间窗、id 倒序游标分页、limit 夹取、时间格式校验", { skip: SKIP }, async () => {
+  const c = machineClient();
+  const u = await freshUser("auditq");
+  // 制造已知审计行：注册一条 + 登录失败两条（错密码），事件类型与账号都可预期
+  const other = new Client(H.BASE);
+  await H.signIn(other, u.name, "WrongPass999");
+  await H.signIn(other, u.name, "WrongPass999");
+
+  // 无筛选：id 倒序，最近的事件在最前。注意 login.fail 出于防账号枚举不带 account_id
+  // （src/routes/pages.ts 验密失败路径只写 detail.name），account_id 筛选只会命中 register.ok
+  const all = await admin(c, "/api/admin/audit/query", { account_id: u.id });
+  assert.equal(all.status, 200);
+  const events = all.json.events;
+  assert.ok(events.length >= 1, "至少应有注册审计");
+  assert.ok(events.every((e, i) => i === 0 || events[i - 1].id > e.id), "应按 id 倒序");
+  assert.ok(events.some((e) => e.event === "register.ok"), "应含 register.ok");
+  for (const e of events) assert.equal(e.account_id, u.id, "account_id 筛选应生效");
+
+  // event 筛选：两条错密码的 login.fail 只能靠 detail.name 认领
+  const fails = await admin(c, "/api/admin/audit/query", { event: "login.fail" });
+  assert.ok(fails.json.events.length >= 2);
+  assert.ok(fails.json.events.every((e) => e.event === "login.fail"), "event 筛选应生效");
+  assert.equal(
+    fails.json.events.filter((e) => e.detail?.name === u.name).length,
+    2,
+    "应恰 2 条本账号的 login.fail",
+  );
+
+  // 时间窗：since 取未来 1 小时 → 空；since 取过去 1 天 → 本账号 register.ok 命中
+  const future = await admin(c, "/api/admin/audit/query", { account_id: u.id, since: new Date(Date.now() + 3600_000).toISOString() });
+  assert.equal(future.json.events.length, 0, "未来时间窗应为空");
+  const past = await admin(c, "/api/admin/audit/query", { account_id: u.id, since: new Date(Date.now() - 86_400_000).toISOString() });
+  assert.ok(past.json.events.length >= 1, "过去 1 天时间窗应含注册审计");
+
+  // 非法时间格式 400
+  const badTime = await admin(c, "/api/admin/audit/query", { since: "不是时间" });
+  assert.equal(badTime.status, 400);
+  assert.equal(badTime.json.error, "bad_request");
+
+  // 游标分页：limit=2，第二页用 next_cursor 续翻，直到取完（用全量账号不限定的流验证翻页语义）
+  const p1 = await admin(c, "/api/admin/audit/query", { event: "login.fail", limit: 2 });
+  assert.equal(p1.json.events.length, 2);
+  assert.ok(p1.json.next_cursor, "还有更多应给 next_cursor");
+  const p2 = await admin(c, "/api/admin/audit/query", { event: "login.fail", limit: 2, cursor: p1.json.next_cursor });
+  assert.ok(p2.json.events.length >= 1);
+  assert.ok(p2.json.events.every((e) => e.id < p1.json.next_cursor), "游标后的行应严格更旧");
+  const allIds = [...p1.json.events, ...p2.json.events].map((e) => e.id);
+  assert.equal(new Set(allIds).size, allIds.length, "翻页不应重复");
+
+  // limit 夹取：>100 按 100、<1 按 1；不存在的 event 静默空集
+  const big = await admin(c, "/api/admin/audit/query", { limit: 500 });
+  assert.ok(big.json.events.length <= 100, "limit 应夹到 100");
+  const tiny = await admin(c, "/api/admin/audit/query", { event: "login.fail", limit: 0 });
+  assert.equal(tiny.json.events.length, 1, "limit=0 应夹到 1");
+  const none = await admin(c, "/api/admin/audit/query", { event: "no.such.event" });
+  assert.deepEqual(none.json.events, [], "不存在的 event 应空集");
+  assert.equal(none.json.next_cursor, null, "空结果无下一页");
 });

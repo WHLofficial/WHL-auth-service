@@ -34,6 +34,16 @@ const bad = (c: Context<AppEnv>, error: string, message: string, status: 400 | 4
 
 const rowsOf = <T,>(r: { results?: unknown[] } | undefined): T[] => (r?.results ?? []) as T[];
 
+/** audit_log.detail 列按约定是 JSON 串，但查询端点不做写入方的前置校验——解析失败降级为原始串，别 500 */
+const parseDetail = (s: string | null): unknown => {
+  if (s === null) return null;
+  try {
+    return JSON.parse(s);
+  } catch {
+    return s;
+  }
+};
+
 // ---------- 角色/权限点目录（静态数据，isolate 内存缓存） ----------
 
 type CatalogRole = { id: number; app_id: string | null; key: string; name: string };
@@ -589,6 +599,70 @@ app.post("/api/admin/sessions/revoke", async (c) => {
     ),
   );
   return c.json({ ok: true, revoked });
+});
+
+// 审计日志查询（增量 10，PRD P1-3）：按账号/事件类型/时间窗筛选，id 倒序游标分页。
+// 只读不记审计（照 catalog/list 先例）。audit_log.id 是自增主键，id 序 = 写入序，倒序翻页
+// 用 WHERE id < cursor 免 OFFSET 深翻页；event 维度由 0010 的 idx_audit_event(event, created_at) 选路。
+app.post("/api/admin/audit/query", async (c) => {
+  const m = await machineBody(c);
+  if ("err" in m) return m.err;
+  // str() 对缺参返回空串、int() 对 null 返回 0：调用方（machineCall）会把没传的筛选字段序列化成
+  // null，这里统一归一成 null（「没传」与「传空」都不进筛选条件，cursor=null 表示第一页）
+  const accountId = m.body.account_id == null ? null : int(m.body.account_id);
+  const event = str(m.body.event) || null;
+  const since = str(m.body.since) || null;
+  const until = str(m.body.until) || null;
+  for (const [k, v] of [["since", since], ["until", until]] as const) {
+    if (v !== null && Number.isNaN(Date.parse(v))) return bad(c, "bad_request", `${k} 不是合法时间（ISO 8601）`, 400);
+  }
+  const limitRaw = int(m.body.limit) ?? 50;
+  const limit = Math.min(Math.max(limitRaw, 1), 100);
+  const cursor = m.body.cursor == null ? null : int(m.body.cursor);
+  const where: string[] = [];
+  const binds: (number | string)[] = [];
+  if (accountId !== null) {
+    where.push("account_id = ?");
+    binds.push(accountId);
+  }
+  if (event !== null) {
+    where.push("event = ?");
+    binds.push(event);
+  }
+  if (since !== null) {
+    where.push("created_at >= ?");
+    binds.push(since);
+  }
+  if (until !== null) {
+    where.push("created_at <= ?");
+    binds.push(until);
+  }
+  if (cursor !== null) {
+    where.push("id < ?");
+    binds.push(cursor);
+  }
+  // 多取一行探测是否有下一页，省一次 COUNT（审计表只增不清，COUNT 只会越来越贵）
+  const rows = rowsOf<{ id: number; account_id: number | null; event: string; detail: string | null; ip: string | null; created_at: string }>(
+    await c.env.DB.prepare(
+      `SELECT id, account_id, event, detail, ip, created_at FROM audit_log
+        ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+        ORDER BY id DESC LIMIT ${limit + 1}`,
+    )
+      .bind(...binds)
+      .all(),
+  );
+  const hasMore = rows.length > limit;
+  return c.json({
+    events: rows.slice(0, limit).map((r) => ({
+      id: r.id,
+      account_id: r.account_id,
+      event: r.event,
+      detail: parseDetail(r.detail),
+      ip: r.ip,
+      created_at: r.created_at,
+    })),
+    next_cursor: hasMore ? rows[limit - 1].id : null,
+  });
 });
 
 // ---------- 组织设置与注册码（真源在本库：tour 侧同名接口已改为死写） ----------
