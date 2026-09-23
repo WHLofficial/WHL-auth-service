@@ -80,7 +80,7 @@ WHL 生态现有三个系统（赛事平台 tour.whleague.win、竞猜系统 gue
 |---|------|------|
 | P2-1 | 2FA（TOTP）/ 邮箱验证 / 异地登录提醒 | credential.type 已预留第二因子扩展位 |
 | P2-2 | 个人资料收编 | 待 §7 影响分析拍板，本期默认不收编 |
-| P2-3 | whleague.win 根域门户页 | 生态入口 + 登录状态展示；club 前端指向根域的死链本期先改指 auth |
+| P2-3 | whleague.win 根域门户页 | 生态入口 + 登录状态展示；club 前端指向根域的死链本期先改指 auth。**待定**：apex 目前无部署（DNS 无 A 记录），要做需先定部署形态 |
 | P2-4 | AstrBot 成长控制台 SSO 收口 | 该控制台目前靠 AstrBot Dashboard 登录态保护、无端点级权限，属后续对接 |
 | P2-5 | 谈判插件 QQ→球队绑定收口 | 由 `identity(QQ) → 账号 → 俱乐部绑定` 链推导，数据模型已留路 |
 | P2-6 | 第三方 OAuth（微信/GitHub 等）、手机号注册 | identity.provider 可扩展 |

@@ -23,13 +23,12 @@ const clubRedirectUris = JSON.stringify(["https://club.whleague.win/api/auth/cal
 const clubPostLogouts = JSON.stringify(["https://club.whleague.win/", CLUB_LOCAL_POST_LOGOUT]);
 const guessRedirectUris = JSON.stringify(["https://guess.whleague.win/api/auth/callback", GUESS_LOCAL_REDIRECT]);
 const guessPostLogouts = JSON.stringify(["https://guess.whleague.win/", GUESS_LOCAL_POST_LOGOUT]);
-// tour 线上有主域与子域两个入口，回调/登出白名单都收；back-channel 取主域（单一收端点）
+// tour 线上只有子域入口 tour.whleague.win；主域 whleague.win 无部署，回调/登出白名单只收子域
 const tourRedirectUris = JSON.stringify([
-  "https://whleague.win/api/auth/callback",
   "https://tour.whleague.win/api/auth/callback",
   TOUR_LOCAL_REDIRECT,
 ]);
-const tourPostLogouts = JSON.stringify(["https://whleague.win/", "https://tour.whleague.win/", TOUR_LOCAL_POST_LOGOUT]);
+const tourPostLogouts = JSON.stringify(["https://tour.whleague.win/", TOUR_LOCAL_POST_LOGOUT]);
 
 const statements = [
   `INSERT INTO app (client_id, name, redirect_uris, post_logout_redirect_uris, backchannel_logout_uri, created_at)
