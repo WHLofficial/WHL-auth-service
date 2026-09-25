@@ -1,3 +1,5 @@
+import { APP_VERSION } from "../version";
+
 /** HTML 转义：所有动态插值进模板前必须过 esc */
 export function esc(value: string): string {
   return value
@@ -29,6 +31,7 @@ button.btn2 { background: #eef0f3; color: #1c1e21; }
 button.btn2:hover { background: #e2e5ea; }
 .foot { margin-top: 16px; font-size: 13px; color: #6a7280; text-align: center; }
 .foot a { color: #2563eb; text-decoration: none; }
+.ver { margin-top: 18px; font-size: 12px; color: #9aa1ab; text-align: center; letter-spacing: .4px; }
 .msg { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c;
   font-size: 13px; padding: 10px 12px; border-radius: 8px; margin: 0 0 4px; }
 .notice { background: #eff6ff; border: 1px solid #bfdbfe; color: #1d4ed8;
@@ -83,6 +86,7 @@ export function page(title: string, body: string, heading = "WHL 统一登录"):
 <main class="card">
 <h1>${esc(heading)}</h1>
 ${body}
+<p class="ver">WHL 统一登录 · v${APP_VERSION}</p>
 </main>
 </body>
 </html>`;
