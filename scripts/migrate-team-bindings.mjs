@@ -1,4 +1,4 @@
-// 球队绑定一次性迁移（增量 7，TECH_DESIGN §5.3 改判后新表 team/team_bind_code/team_binding）：
+// 球队绑定一次性迁移（v1.0.0，TECH_DESIGN §5.3 改判后新表 team/team_bind_code/team_binding）：
 // 目录 = tour team ↔ club clubs 按名字精确匹配建行（team.tour_team_id / club_id）；
 // 绑定 = tour team_member 为基准全量迁 team_binding（account_id = tour user.id 同值延续，
 // bound_via='tour'）；club club_bindings 只做校对：账号已在 team_member 且目录 club_id
@@ -163,7 +163,7 @@ console.log(sql ? `${sql}\n` : '');
 
 // ---- 报告（Markdown，人工裁决用） ----
 const lines = [
-  '# 球队绑定迁移报告（增量 7）',
+  '# 球队绑定迁移报告（v1.0.0）',
   '',
   `- 源：tour ${tourDb}（team ${teams.length} / team_member ${members.length}）+ club ${clubDb}（clubs ${clubs.length} / club_bindings ${clubBinds.length}）`,
   `- 产出：目录行 ${teamStmts.length}、绑定 INSERT ${stmts.length}（SQL 见脚本 stdout，执行到 whl-auth）`,

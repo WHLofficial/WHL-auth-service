@@ -1,4 +1,4 @@
-// 会话管理（增量 10，PRD P1-2）：自助列表、单个下线（含当前设备）、下线其他设备、
+// 会话管理（v3.1.0，PRD P1-2）：自助列表、单个下线（含当前设备）、下线其他设备、
 // 越权吊销拒绝、CSRF、审计同批入账、back-channel 联动在 RP 侧（本文件验 auth 侧行为）。
 import { test } from "node:test";
 import assert from "node:assert/strict";

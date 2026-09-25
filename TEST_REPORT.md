@@ -223,7 +223,7 @@
 **用法**：`npm run test`（`package.json` scripts → `node tests/run.mjs`）。可选 `AUTH_TEST_PORT` 指定端口、`AUTH_TEST_KEEP=1` 保留临时目录与 dev 日志（默认删）、`AUTH_TEST_ONLY=<片段>` 只跑匹配的测试文件（定位偶发问题用）。
 
 **最终结果**：**87 tests / 87 pass / 0 fail / exit 0**，耗时 **269s**（日志 `C:/Users/bhdjb/AppData/Local/Temp/auth-final-run.log`）。加固后的历史运行另含完整跑 2 次 79/79（修复前的基线，162s / 170s）与多次定向跑全绿。
-> 本节数字是**增量 6 的基线**。此后增量 7 追加 `tests/e2e/team.test.mjs`（5 例）、增量 8 追加 `tests/e2e/admin.test.mjs`（13 例），当前总数为 **110 tests / 110 pass**（详见 §10.4）。
+> 本节数字是**v0.1.0 的基线**。此后 v1.0.0 追加 `tests/e2e/team.test.mjs`（5 例）、v2.0.0 追加 `tests/e2e/admin.test.mjs`（13 例），当前总数为 **110 tests / 110 pass**（详见 §10.4）。
 
 **它做了什么**：删除并重建 `.wrangler/test-state` → 在**该隔离目录**上跑 `d1 migrations apply`（不碰开发实例的库）→ 找一个空闲端口起 `wrangler dev --persist-to <隔离目录>` → 轮询 `/healthz` → 播种测试数据（`test-rp` 这个 app 行 + 一枚 `REGR-<hex>` 注册码，`max_uses` 100000）→ 用 `node --test` 跑 unit + e2e（11 个文件）。因为每次都是全新库，不需要清理限流桶或测试账号。
 
@@ -245,8 +245,8 @@
 | `tests/e2e/logout.test.mjs` | 6 | **F-I**（RP 先自吊销 refresh 后仍须收到通知）、正常登出（恰 1 条通知 + 会话吊销 + refresh 全吊销）、`GET /logout` 白名单内外、无授权时不广播不报错、CSRF 无效不误登出、**L-1 跨站被拒** |
 | `tests/e2e/register.test.mjs` | 9 | 有效码、开放注册开关两态、重名不烧码、无效码三态文案、**并发双花**（3 并发 → 恰 1 个账号）、密码/昵称规则 6 例（含 33 字符昵称必须 400 而非 500）、CSRF、注册 IP 桶 5/3600、已登录回跳 |
 
-| `tests/e2e/team.test.mjs`（增量 7） | 5 | 球队目录登记/发码/烧码（含并发竞速输家整批零写回 `invalid_code`）/一账号一队/解绑与派生读 |
-| `tests/e2e/admin.test.mjs`（增量 8） | 13 | 见 §10.2（管理机器端点全量 + 审计 + 停用语义 + 跨服务实联另见 tour 侧） |
+| `tests/e2e/team.test.mjs`（v1.0.0） | 5 | 球队目录登记/发码/烧码（含并发竞速输家整批零写回 `invalid_code`）/一账号一队/解绑与派生读 |
+| `tests/e2e/admin.test.mjs`（v2.0.0） | 13 | 见 §10.2（管理机器端点全量 + 审计 + 停用语义 + 跨服务实联另见 tour 侧） |
 
 **支撑库**：`tests/lib/client.mjs`（cookie jar + 表单 + CSRF 提取，**每个 Client 默认注入独立随机 `CF-Connecting-IP`**，否则本地共享 `local` 桶会互相打死；所有请求带 `connection: close`，不复用连接以规避 keep-alive 陈旧 socket 抖动）、`tests/lib/env.mjs`（wrangler CLI 封装，对 Windows 上 `ECONNRESET/EBUSY/SQLITE_BUSY` 做退避重试）、`tests/lib/harness.mjs`（注册/登录/授权码/换码/刷新/吊销/back-channel 接收器/JWKS 验签）、`tests/lib/loader.mjs`（**必需**：Node 24 原生 TS 剥离不会给 `src` 内部省略扩展名的相对导入补 `.ts`，此 loader 用 `module.registerHooks` 补上，否则 `hmac`/`oidc`/`csrf`/`session` 等模块无法在单测里导入 —— 产品代码一行未改）。
 
@@ -301,7 +301,7 @@
 
 ---
 
-## 10. 增量 8：账号管理能力落到 auth（2026-09-18）
+## 10. v2.0.0：账号管理能力落到 auth（2026-09-18）
 
 **背景（要修的缺陷）**：账号真源 2026-09-14 已收口到 auth（`account`/`credential`/`user_role`），但 tour 管理台的写操作仍打自己已归档的 `user` 表，**6 处死写且无一处有 OIDC 门控**：改角色（`worker/routes/admin/accounts.ts:61`）、解锁观众号（`:72`）、重置密码（`:87-88`，发出的临时密码登不进去）、开放注册开关（`worker/routes/admin.ts:50`）、注册码生成（`:57-73`，生成的码一个都用不掉）、注册码列表（`:76-96`，列出的永远是用不掉的码）。管理员日常入口批量失效，且当时 auth 侧**没有任何账号管理端点**（`src/routes/machine.ts` 只有球队绑定五条 + 绑定两条），线上无可用入口做「重置密码 / 解锁 / 改角色」。
 
@@ -326,7 +326,7 @@
 
 **数据层（`migrations/0009_admin.sql`）**：新增 `account_permission`（账号级额外授予）、`account.disabled_at`（停用；`locked` 语义完全不动）、`session.ip`。`session.last_seen_at` 是既有列，本轮开始写入（**热路径节流 5 分钟**）。
 
-**审计**：`AuditEvent` 扩 11 项（`role.grant`/`role.revoke`/`perm.grant`/`perm.revoke`/`session.revoke`/`pw.reset`/`account.disable`/`account.enable`/`account.unlock`/`signup_code.create`/`org.open_reg`），补齐了 TECH_DESIGN §8.8 要求但一直缺入口的 `role.grant`/`role.revoke`/`session.revoke`。新增 `auditStatement()` 供 `DB.batch` 使用——**业务写入与审计同一次批**（原先 `audit()` 只能单独 `.run()`，无法进批）。tour 侧对同一动作另记一份本地审计（`target_type='account'`，带 `actor_user_id`），双写沿用增量 7 球队绑定的先例。
+**审计**：`AuditEvent` 扩 11 项（`role.grant`/`role.revoke`/`perm.grant`/`perm.revoke`/`session.revoke`/`pw.reset`/`account.disable`/`account.enable`/`account.unlock`/`signup_code.create`/`org.open_reg`），补齐了 TECH_DESIGN §8.8 要求但一直缺入口的 `role.grant`/`role.revoke`/`session.revoke`。新增 `auditStatement()` 供 `DB.batch` 使用——**业务写入与审计同一次批**（原先 `audit()` 只能单独 `.run()`，无法进批）。tour 侧对同一动作另记一份本地审计（`target_type='account'`，带 `actor_user_id`），双写沿用 v1.0.0 球队绑定的先例。
 
 **权限下发改造**：`oidc.ts permissionsFor` 从「全表拉 role_permission 再在 JS 过滤」改为一条 UNION SQL（角色派生 ∪ 账号级授予，后者按 `p.app_id = aud` 收紧），**调用点不变、往返数不变**。userinfo/id_token claims 新增 `disabled`；被停用账号 `/userinfo` 下发空 roles/permissions，`/token` 换码与刷新回 `invalid_grant`，会话中间件把 `disabled_at` 与吊销/过期并列为一道闸。
 
@@ -353,11 +353,11 @@
 
 ### 10.4 回归结果（本轮实测）
 
-- auth：`npm run typecheck`（`tsc --noEmit`）干净；`npm test`（`node tests/run.mjs`）**110 tests / 110 pass**（§7 的 87 为增量 6 基线，增量 7 加 `team.test.mjs` 5 例、增量 8 加 `admin.test.mjs` 13 例）。
+- auth：`npm run typecheck`（`tsc --noEmit`）干净；`npm test`（`node tests/run.mjs`）**110 tests / 110 pass**（§7 的 87 为 v0.1.0 基线，v1.0.0 加 `team.test.mjs` 5 例、v2.0.0 加 `admin.test.mjs` 13 例）。
 - tour：`npm run typecheck`（`tsc --noEmit && tsc -p tsconfig.worker.json --noEmit`）干净；`npm test`（`vitest run`）**96 passed / 6 skipped**（skip 的是需真机 auth 的实联用例）；`npm run build`（vite）成功。
 - 跨服务实联：auth `npm run dev`（8792）+ tour `AUTH_LIVE_URL=http://127.0.0.1:8792 npx vitest run tests/admin.live.test.ts` → **6/6 通过**。
 
-### 10.5 偏差与未覆盖（增量 8）
+### 10.5 偏差与未覆盖（v2.0.0）
 
 **偏差**
 
@@ -374,7 +374,7 @@
 
 ---
 
-## 11. 增量 9：P0 契约对齐与残留清理（2026-09-18）
+## 11. v3.0.0：P0 契约对齐与残留清理（2026-09-18）
 
 **范围**：四项——A 透明重哈希 + 迭代数压测决策（auth）、B guess 绑定闭环（auth + guess）、C compat 开关显式化（tour/guess/club）、D 残留清理（tour/guess）。§9 的限流 KV→D1 偏差于本轮获用户认可定案（见 §9 标注）。
 
@@ -413,11 +413,11 @@
 
 ### 11.4 验证与遗留
 
-- **auth**：typecheck 绿；全套 `npm test` 全绿（本轮 113 例，较增量 8 的 110 新增 3：透明重哈希 e2e 1 + lookup e2e 1 + crypto/hashIterations 单测 1）；admin e2e 单跑 14/14。
+- **auth**：typecheck 绿；全套 `npm test` 全绿（本轮 113 例，较 v2.0.0 的 110 新增 3：透明重哈希 e2e 1 + lookup e2e 1 + crypto/hashIterations 单测 1）；admin e2e 单跑 14/14。
 - **tour**：typecheck 绿、vitest 115 passed + 6 skipped（新增 compat register 410 断言）。
 - **guess**：vitest 16/16（镜像三用例重写为「停写 + 实时查询」口径，lookup 桩带 HMAC 验签）。
 - **club**：typecheck 绿、vitest 316/316（仅 C 项小改）。
 - **跨服务实联**：本地起 auth dev，HMAC 签名实打 `/api/admin/identity/lookup`（命中/未命中/去重语义正确）；tour `tests/admin.live.test.ts` 6/6。
 - **部署注意（生产）**：guess 需 `wrangler secret put AUTH_BIND_SECRET`（与 auth `BIND_SECRET` 同值；本地已写入 `.dev.vars`）；**上线前必须确认插件 `bind_claim_url` 已指向 auth**（本来就是待办）——若插件仍走 guess 老回退绑定，新读点看不到该绑定，用户会被判未绑定。
-- **遗留**：lookup 挂在 `/api/admin/*` 前缀下但实为 RP 通用只读查询（沿用批准的计划命名）；guess 用户列表的 `user_binding` JOIN 未删（OIDC 下结果被 lookup 覆盖，省一次改动面，记入增量 10 可选清理）。
+- **遗留**：lookup 挂在 `/api/admin/*` 前缀下但实为 RP 通用只读查询（沿用批准的计划命名）；guess 用户列表的 `user_binding` JOIN 未删（OIDC 下结果被 lookup 覆盖，省一次改动面，记入 v3.1.0 可选清理）。
 

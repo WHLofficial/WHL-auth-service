@@ -1,9 +1,9 @@
-# 权限点对照表（增量 10，PRD P1-3 前置盘点）
+# 权限点对照表（v3.1.0，PRD P1-3 前置盘点）
 
 权限真源在本库（`permission` / `role` / `role_permission` / `account_permission`），登录 claims 的
 `permissions` 按 aud 过滤下发（`src/routes/oidc.ts` 的 `permissionsFor`：角色派生 UNION 账号级授予，
 账号级授予收紧到 `p.app_id = aud` 防跨系统泄漏）。本文对照「auth 定义」与「三仓实际检查」，行号以
-增量 10 时点为准，会漂移；以 grep 权限点键名为准。
+v3.1.0 时点为准，会漂移；以 grep 权限点键名为准。
 
 ## 语义判定入口（三仓）
 
@@ -39,13 +39,13 @@ guess `guess.admin|superadmin→admin`；club `superadmin|club.admin→admin / c
 
 ## 已删除死点
 
-- **`tour.team.bindcode.issue`**（0010 删除）：签发球队认证码在增量 7 收进 auth 机器端点
+- **`tour.team.bindcode.issue`**（0010 删除）：签发球队认证码在 v1.0.0 收进 auth 机器端点
   `/api/team/bindcode`（按绑定关系校验，不经权限点），tour 全仓从未检查过它——目录里有、claims
   下发、零消费。删除后 recorder 的 claims 少一个无效点。
 
 ## 有意设计（注明，不改行为）
 
-1. **tour 扣分端点保留 superadmin 角色直判**（`routes/admin/tournaments.ts` 扣分）：增量 8 既定
+1. **tour 扣分端点保留 superadmin 角色直判**（`routes/admin/tournaments.ts` 扣分）：v2.0.0 既定
    决策——目录外保留角色判定，避免为单一端点扩权限点。
 2. **club 教练资格走「球队绑定」旁路**（`club/session.ts` `requireCoach`）：auth 对所有新账号自动发
    `club.coach`，权限点无区分度，实际闸门是 `hasTeamBinding()`；权限点仅作管理组旁路。
@@ -55,7 +55,7 @@ guess `guess.admin|superadmin→admin`；club `superadmin|club.admin→admin / c
    `guess.admin`，club = `club.admin` 六点并集；seed-grants 只是对历史 admin 账号**同时播三个角色**
    维持迁移前等价。账号级单点授予（account_permission）只在本系统生效（aud 过滤），本就如此。
 
-## 管理端点（增量 8/10）
+## 管理端点（v2.0.0/v3.1.0）
 
 `/api/admin/*`（machineGate HMAC，界面在 tour，P1-1 既定）：`catalog`、`identity/lookup`（9B）、
 `accounts/list|detail|roles|grants|password|unlock|disable`、`sessions/revoke`、`org-settings`、

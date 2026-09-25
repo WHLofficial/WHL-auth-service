@@ -17,7 +17,7 @@ const wrangler = join(repoRoot, "node_modules", "wrangler", "bin", "wrangler.js"
 const FOREIGN_DB = {
   whl: "ec3cc695-70bc-47ab-a454-5ca62ec22dd6", // WHL-tournament-management-system 主库
   "whl-guess": "8f48bd5e-5d1b-4d62-ba4f-bf9b0cdb09eb", // WHL-Daily-Activities-System 主库
-  "whl-club": "73154873-d5ae-42b0-a630-25f5ef60053d", // WHL-club-operations-platform 主库（增量 7 迁移读 clubs/club_bindings）
+  "whl-club": "73154873-d5ae-42b0-a630-25f5ef60053d", // WHL-club-operations-platform 主库（v1.0.0 迁移读 clubs/club_bindings）
 };
 
 let configPath;
@@ -40,7 +40,7 @@ function foreignConfig() {
 export const REPO_STATE = join(repoRoot, ".wrangler", "state");
 // 兄弟仓库的本地状态（读 guess 库的发起人名单等他仓库数据时用）
 export const GUESS_STATE = resolve(repoRoot, "../WHL-Daily-Activities-System/.wrangler/state");
-// 增量 7：迁移脚本读 tour/club 两兄弟仓的本地库时锚定其状态目录
+// v1.0.0：迁移脚本读 tour/club 两兄弟仓的本地库时锚定其状态目录
 export const TOUR_STATE = resolve(repoRoot, "../WHL-tournament-management-system/.wrangler/state");
 export const CLUB_STATE = resolve(repoRoot, "../WHL-club-operations-platform/.wrangler/state");
 

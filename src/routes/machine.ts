@@ -1,10 +1,10 @@
-// 机器端点（P0-8 / 增量 7）：无 cookie 的 HMAC 通道。
+// 机器端点（P0-8 / v1.0.0）：无 cookie 的 HMAC 通道。
 // QQ 绑定（积分插件 ↔ auth）：POST /api/bind/claim {code, qq_id} → 200 {ok, displayName}；
 //   POST /api/identity/unbind {qq_id}（QQ 群直接发「解绑」，via=qq_direct）、
-//   POST /api/identity/unbind/confirm {code, qq_id}（网页发起 → QQ 持码确认，增量 11）。
+//   POST /api/identity/unbind/confirm {code, qq_id}（网页发起 → QQ 持码确认，v3.2.0）。
 //   业务错误 400 {error, message}
 //   （invalid_code / qq_bound / user_bound / not_bound / code_mismatch），验签失败 401。
-// 球队绑定（增量 7，tour/club 双入口）：绑定关系唯一真源在本库，双方经只读 AUTH_DB 派生——
+// 球队绑定（v1.0.0，tour/club 双入口）：绑定关系唯一真源在本库，双方经只读 AUTH_DB 派生——
 //   /api/team/bindcode 发码、/api/team/bind 烧码（写绑定+烧码+审计同 batch，杜绝撕裂写）、
 //   /api/team/unbind 解绑、/api/team/register 目录 upsert、/api/team/link 俱乐部关联。
 // 审计行与业务写入同一 batch（同库隐式事务）：绑定变更必有审计，不出现「已绑定但无审计」。
@@ -105,7 +105,7 @@ app.post("/api/identity/unbind", async (c) => {
   return c.json({ ok: true, displayName: (await displayNameOf(c, row.account_id)) ?? "" });
 });
 
-// 解绑确认码核销（增量 11，P1-4）：网页 /bind/unbind 发起 → QQ 群「解绑 <码>」→
+// 解绑确认码核销（v3.2.0，P1-4）：网页 /bind/unbind 发起 → QQ 群「解绑 <码>」→
 // 插件调本端点。三重校验后删绑定：码有效（kind='unbind'、未用未过期）+ 该 QQ 确有绑定 +
 // 码归属账号与该 QQ 绑定的账号一致（防拿自己的码解别人的绑定）。
 // 删 identity、核销码、审计三句同 batch；审计 detail.via 与 QQ 直接解绑（qq_direct）区分。
@@ -138,7 +138,7 @@ app.post("/api/identity/unbind/confirm", async (c) => {
     return c.json({ error: "code_mismatch", message: "解绑码与该 QQ 绑定的账号不一致" }, 400);
   }
 
-  // 以码未用为条件核销（同增量 7 烧码竞速修法）：同码两路并发只赢一路，
+  // 以码未用为条件核销（同 v1.0.0 烧码竞速修法）：同码两路并发只赢一路，
   // 输家 changes=0 整批零写回、按无效码回应，不产生重复审计
   const results = await c.env.DB.batch([
     c.env.DB.prepare(
@@ -155,7 +155,7 @@ app.post("/api/identity/unbind/confirm", async (c) => {
   return c.json({ ok: true, displayName: (await displayNameOf(c, binding.account_id)) ?? "" });
 });
 
-// ---------- 球队绑定（增量 7：tour/club 双入口，真源在本库） ----------
+// ---------- 球队绑定（v1.0.0：tour/club 双入口，真源在本库） ----------
 
 const VIAS = new Set(["tour", "club"]);
 

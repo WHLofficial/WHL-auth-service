@@ -1,4 +1,4 @@
-// 管理机器端点（增量 8，PRD P1-1）：把管理能力落到 auth，管理界面仍留在 tour。
+// 管理机器端点（v2.0.0，PRD P1-1）：把管理能力落到 auth，管理界面仍留在 tour。
 //
 // 为什么长这样：账号真源 2026-09-14 收口到本库后，tour 管理台的写操作仍打自己的库
 // （worker/routes/admin/accounts.ts 与 worker/routes/admin.ts 共 6 处死写），改角色/解锁/
@@ -12,7 +12,7 @@
 //   - 列表禁止 N+1：账号页 + 角色 IN 查询，两次读、一次往返两次；会话不进列表
 //   - 详情一次返回：账号/角色/授予/会话/QQ 五条语句走一个 DB.batch（一次往返）
 //   - 角色目录（8 角色 + 17 权限点）按 isolate 内存缓存 60s（先例：lib/csp.ts 的 clientOrigins）
-//   - 写操作「业务写入 + 审计」同 batch 提交（同库隐式事务），杜绝增量 7 那种撕裂写
+//   - 写操作「业务写入 + 审计」同 batch 提交（同库隐式事务），杜绝 v1.0.0 那种撕裂写
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { AppEnv } from "../env";
@@ -146,7 +146,7 @@ app.post("/api/admin/catalog", async (c) => {
   });
 });
 
-// QQ 身份批量查询（增量 9B，guess 绑定闭环的读通道）：绑定真源在 identity 表，RP 侧不再维护
+// QQ 身份批量查询（v3.0.0，guess 绑定闭环的读通道）：绑定真源在 identity 表，RP 侧不再维护
 // 本地镜像快照，改实时查这里。只读、不记审计（照 catalog/list 先例）；一条 IN 查询（单批 ≤100），
 // 未绑定的 id 不出现在结果里。入参用 auth account.id（guess users.tour_id / tour user.id 同值）。
 app.post("/api/admin/identity/lookup", async (c) => {
@@ -601,7 +601,7 @@ app.post("/api/admin/sessions/revoke", async (c) => {
   return c.json({ ok: true, revoked });
 });
 
-// 审计日志查询（增量 10，PRD P1-3）：按账号/事件类型/时间窗筛选，id 倒序游标分页。
+// 审计日志查询（v3.1.0，PRD P1-3）：按账号/事件类型/时间窗筛选，id 倒序游标分页。
 // 只读不记审计（照 catalog/list 先例）。audit_log.id 是自增主键，id 序 = 写入序，倒序翻页
 // 用 WHERE id < cursor 免 OFFSET 深翻页；event 维度由 0010 的 idx_audit_event(event, created_at) 选路。
 app.post("/api/admin/audit/query", async (c) => {

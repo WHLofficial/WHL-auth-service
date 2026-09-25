@@ -1,4 +1,4 @@
-// 机器端点共用门（原在 src/routes/machine.ts，增量 8 抽出供 routes/admin.ts 复用）：
+// 机器端点共用门（原在 src/routes/machine.ts，v2.0.0 抽出供 routes/admin.ts 复用）：
 // 限流 → 验签 → 取 raw body。契约与竞猜系统 verifyPluginRequest 逐字一致：
 // X-Sign = HMAC-SHA256(secret, "POST|path|ts|raw")，path 含 query，只支持 POST。
 import type { Context } from "hono";

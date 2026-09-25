@@ -7,10 +7,10 @@ WHL 生态统一认证中心（auth.whleague.win）。方案见 [PRD.md](./PRD.m
 - **迁移步骤①（已实现）**：登录/注册/改密页，按 tour 旧格式双写共享 KV + auth D1，三系统零改动接入。
 - **迁移步骤②（P0-4 已实现）**：OIDC Provider 全套端点，club 试点接入的依赖。
 - **迁移步骤③（P0-11 已实现，2026-09-14 上线）**：auth 切读自身 `account`/`credential`，tour `user` 表转只读；tour / guess / club 三站生产已切 OIDC 客户端。
-- **增量 7（已实现）**：球队绑定真源上收 auth（0008 三表 + 五条 HMAC 机器端点），tour/club 双入口发码烧码写同一张中央表。
-- **增量 8（已实现）**：账号管理能力落到 auth（0009 + 12 条 HMAC 管理机器端点 `/api/admin/*`），tour 管理台改为转发调用，原先 6 处写自己 `user` 表的死写全部改道。**管理界面仍在 tour 侧，auth 只出能力**。
+- **v1.0.0（已实现）**：球队绑定真源上收 auth（0008 三表 + 五条 HMAC 机器端点），tour/club 双入口发码烧码写同一张中央表。
+- **v2.0.0（已实现）**：账号管理能力落到 auth（0009 + 12 条 HMAC 管理机器端点 `/api/admin/*`），tour 管理台改为转发调用，原先 6 处写自己 `user` 表的死写全部改道。**管理界面仍在 tour 侧，auth 只出能力**。
 
-## 管理能力端点速览（增量 8）
+## 管理能力端点速览（v2.0.0）
 
 全部 **POST + HMAC 验签**，与球队绑定共用 `machineGate`（限流 + `X-Sign = hex(HMAC-SHA256(BIND_SECRET, "POST|path|ts|raw"))`，±300s）；调用方是 tour 管理台（`worker/lib/authAdmin.ts`），操作者身份作 `actor_id` 传入，鉴权由调用方的权限点负责。
 

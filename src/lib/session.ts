@@ -36,7 +36,7 @@ export async function createSession(c: Context<AppEnv>, userId: number): Promise
       nowIso(),
       new Date(Date.now() + TTL_SECONDS * 1000).toISOString(),
       nowIso(),
-      clientIp(c), // 增量 8：管理台「活跃会话」要显示来源，建会话时留一次
+      clientIp(c), // v2.0.0：管理台「活跃会话」要显示来源，建会话时留一次
     )
     .run();
   setCookie(c, SESSION_COOKIE, token, {
@@ -75,7 +75,7 @@ export async function getSessionUser(c: Context<AppEnv>): Promise<SessionUser | 
       expires_at: string;
       last_seen_at: string | null;
     }>();
-  // 停用账号（增量 8）与已吊销/已过期会话同等对待：判定必须在这里做而不是只靠停用时批量吊销——
+  // 停用账号（v2.0.0）与已吊销/已过期会话同等对待：判定必须在这里做而不是只靠停用时批量吊销——
   // 漏吊销一次（并发、写入失败）这里是最后一道闸。
   if (!row || row.revoked_at || row.expires_at <= nowIso() || row.disabled_at) return null;
   touchSession(c, sessionHash, row.last_seen_at);
@@ -94,7 +94,7 @@ export async function getSessionUser(c: Context<AppEnv>): Promise<SessionUser | 
 }
 
 /**
- * 「最后活跃」（session.last_seen_at，0001 起存在但从未写入，增量 8 启用）：管理台会话列表用。
+ * 「最后活跃」（session.last_seen_at，0001 起存在但从未写入，v2.0.0 启用）：管理台会话列表用。
  * 本函数被 src/index.ts 挂成全站每请求热路径，所以两件事必须做到：
  * 1) 节流——只有为空或超过 TOUCH_INTERVAL_MS 才写；
  * 2) 不 await——写走 waitUntil 后台，不让一次时间戳更新拖慢登录后的每个请求。
@@ -190,7 +190,7 @@ export async function notifyBackchannel(
 }
 
 /**
- * 某账号的存活会话 → 会话指纹到「曾用该会话换过 token 的 client」的映射（增量 8 管理动作共用）。
+ * 某账号的存活会话 → 会话指纹到「曾用该会话换过 token 的 client」的映射（v2.0.0 管理动作共用）。
  * 只查一次 D1；吊销语句与通知扇出都复用这份结果，避免管理动作里按会话循环往返。
  */
 export async function sessionsOfAccount(c: Context<AppEnv>, accountId: number): Promise<Map<string, string[]>> {
@@ -247,7 +247,7 @@ export async function revokeSessionAndNotify(c: Context<AppEnv>, sessionHash: st
 }
 
 /**
- * 吊销某账号全部会话并逐个通知（增量 8：管理台「停用」「重置密码」整批吊销用）。
+ * 吊销某账号全部会话并逐个通知（v2.0.0：管理台「停用」「重置密码」整批吊销用）。
  * 原先只有单会话粒度的 revokeSessionAndNotify，账号级动作没有对应函数——直接循环调它会
  * 每会话一次 D1 往返。这里固定 2 次读/写 + 一次地址查询。
  * @returns 被吊销的会话数
@@ -280,7 +280,7 @@ export function sessionRevokeStatements(
 }
 
 /**
- * 吊销单个会话并通知（增量 8：管理台「强制下线」）。
+ * 吊销单个会话并通知（v2.0.0：管理台「强制下线」）。
  * 与 revokeSessionAndNotify 的区别：这个会把 session.revoked_at 写上（管理动作要真的踢下线，
  * 而不是依赖调用方先 destroySession）。
  * @returns 是否真的吊销了一行（false = 会话不存在、不属于该账号、或已吊销）

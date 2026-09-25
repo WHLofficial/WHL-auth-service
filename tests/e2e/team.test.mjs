@@ -1,4 +1,4 @@
-// 球队绑定机器端点（增量 7）：发码→烧码→一次性/一账号一队/审计 → unbind/rebind →
+// 球队绑定机器端点（v1.0.0）：发码→烧码→一次性/一账号一队/审计 → unbind/rebind →
 // 负例（伪签/坏参/过期码）→ 目录 register upsert 与 link 俱乐部关联（club_taken）。
 // HMAC 契约与 QQ 绑定通道一致（X-Sign = HMAC-SHA256(secret, "POST|path|ts|raw")）；
 // 未配 BIND_SECRET 时整文件跳过（与 run.mjs 的读法一致：.dev.vars → 环境变量）。

@@ -113,7 +113,7 @@ ${SYSTEM_LINKS.map((s) => `<a class="jump ${s.cls}"${s.hidden ? " hidden" : ""} 
 }
 
 /** QQ 绑定页（P0-8）：生成一次性码 → QQ 群「绑定 <码>」由插件核销。
- *  解绑（增量 11，P1-4）：网页发起 → 生成解绑确认码 → QQ 群「解绑 <码>」核销；
+ *  解绑（v3.2.0，P1-4）：网页发起 → 生成解绑确认码 → QQ 群「解绑 <码>」核销；
  *  也可以不发起，直接在群里发「解绑」（老路保留）。换绑 = 解绑确认后回来生成新绑定码。 */
 export function bindPage(opts: {
   csrf: string;
@@ -162,7 +162,7 @@ function fmtTime(iso: string | null): string {
   return iso ? `${iso.slice(0, 16).replace("T", " ")} UTC` : "—";
 }
 
-/** 会话管理页（增量 10，PRD P1-2）：用户自助查看自己的活跃会话并单个下线。
+/** 会话管理页（v3.1.0，PRD P1-2）：用户自助查看自己的活跃会话并单个下线。
  *  只列自己的会话、只有下线动作；管理员能力（任意账号强制下线）在 tour 管理台走机器端点。 */
 export function sessionsPage(opts: {
   csrf: string;

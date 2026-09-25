@@ -1,4 +1,4 @@
-// QQ 绑定/解绑双向闭环（增量 11，PRD P1-4）：网页发起解绑 → 生成解绑确认码（bind_code
+// QQ 绑定/解绑双向闭环（v3.2.0，PRD P1-4）：网页发起解绑 → 生成解绑确认码（bind_code
 // kind='unbind'）→ 插件经 /api/identity/unbind/confirm 核销。覆盖：全链成功与审计 via、
 // 码-QQ 不匹配、无效/过期码、两类码串用被拒、一号一码作废、网页侧防护（匿名/CSRF/限流）、
 // QQ 群直接解绑老路（via=qq_direct）不回归。

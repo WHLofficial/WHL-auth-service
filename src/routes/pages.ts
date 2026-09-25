@@ -147,7 +147,7 @@ app.post("/login", async (c) => {
     }
     return fail(401, "昵称或密码不正确");
   }
-  // 停用账号（增量 8）：判定必须在验密之后——否则拿任意密码去撞就能探出某个昵称是否被停用。
+  // 停用账号（v2.0.0）：判定必须在验密之后——否则拿任意密码去撞就能探出某个昵称是否被停用。
   // 密码正确才走到这里，此时告知真实原因既安全又省掉一次无效的改密往返。
   if (row.disabled_at) {
     await audit(c, "login.fail", { accountId: row.id, detail: { name, reason: "disabled" } });
@@ -429,7 +429,7 @@ app.post("/bind/code", async (c) => {
   return render({ code });
 });
 
-// 发起解绑（增量 11，PRD P1-4）：生成解绑确认码，QQ 群「解绑 <码>」由插件经
+// 发起解绑（v3.2.0，PRD P1-4）：生成解绑确认码，QQ 群「解绑 <码>」由插件经
 // /api/identity/unbind/confirm 核销（核销时校验码归属账号与该 QQ 的绑定一致）。
 // 不在网页直接删 identity：绑定变更必须证明 QQ 持有（PRD P0-8 既定口径）。
 app.post("/bind/unbind", async (c) => {
@@ -461,8 +461,8 @@ app.post("/bind/unbind", async (c) => {
   return render({ unbindCode: code });
 });
 
-// ---------- 会话管理（增量 10，PRD P1-2）：用户自助查看与下线自己的会话 ----------
-// 管理员能力（任意账号强制下线）在 /api/admin/sessions/revoke（增量 8）；这里只服务本人，
+// ---------- 会话管理（v3.1.0，PRD P1-2）：用户自助查看与下线自己的会话 ----------
+// 管理员能力（任意账号强制下线）在 /api/admin/sessions/revoke（v2.0.0）；这里只服务本人，
 // 所有写入都带 account_id 条件（sessionRevokeStatements 内建），审计与吊销同 batch。
 
 const SESSIONS_LIMIT = 50;

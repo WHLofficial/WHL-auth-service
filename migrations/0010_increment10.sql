@@ -1,6 +1,6 @@
--- 增量 10：权限点语义对齐 + 审计查询支撑（PRD P1-3）
+-- v3.1.0：权限点语义对齐 + 审计查询支撑（PRD P1-3）
 --
--- ① 删除死权限点 tour.team.bindcode.issue：增量 7 把球队认证码签发收进 auth 机器端点
+-- ① 删除死权限点 tour.team.bindcode.issue：v1.0.0 把球队认证码签发收进 auth 机器端点
 --    （/api/team/bindcode，按绑定关系校验、不经权限点），tour 全仓从未 requirePermission 检查过它——
 --    目录里有、claims 里下发、无人消费，徒增 superadmin/recorder 的 claims 体积。先删关联行再删目录行；
 --    account_permission（账号级授予）同带 REFERENCES，防御性一并清掉再删目录行。

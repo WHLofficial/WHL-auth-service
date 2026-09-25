@@ -367,7 +367,7 @@ async function rolesForAud(c: Context<AppEnv>, accountId: number, aud: string): 
 }
 
 /**
- * 权限点 = 角色派生 ∪ 账号级额外授予（增量 8「权限点额外授予」，migrations/0009_admin.sql）。
+ * 权限点 = 角色派生 ∪ 账号级额外授予（v2.0.0「权限点额外授予」，migrations/0009_admin.sql）。
  * 一条 UNION SQL 直出：原实现是「全表拉 role_permission 再在 JS 里按角色集过滤」，
  * 每台实例每次 userinfo 都要把多系统的映射全读一遍；改成按 account_id 收窄后，
  * 读的行数只与本账号的授权数相关，且和账号级授予一次取齐（不新增往返）。
@@ -447,7 +447,7 @@ app.post("/token", async (c) => {
     )
       .bind(row.session_hash)
       .first<{ revoked_at: string | null; expires_at: string; disabled_at: string | null }>();
-    // 停用账号（增量 8）在换取 token 这一步也拦一道：停用时会批量吊销会话，但停用与吊销之间
+    // 停用账号（v2.0.0）在换取 token 这一步也拦一道：停用时会批量吊销会话，但停用与吊销之间
     // 已在浏览器里发起的换码请求仍可能到达，这里花 0 次额外往返堵住它。
     if (!sess || sess.revoked_at || sess.expires_at <= nowIso() || sess.disabled_at)
       return oauthJsonError(c, "invalid_grant", "登录会话已结束，请重新登录");
@@ -531,7 +531,7 @@ app.get("/userinfo", async (c) => {
   if (!user) {
     return c.json({ error: "invalid_token" }, 401, { "WWW-Authenticate": 'Bearer error="invalid_token"' });
   }
-  // 停用账号（增量 8）：token 还在有效期内（access 30 分钟 / refresh 7 天）也必须立刻失去
+  // 停用账号（v2.0.0）：token 还在有效期内（access 30 分钟 / refresh 7 天）也必须立刻失去
   // 角色与权限点——RP 是拿 userinfo 的 roles/permissions 做鉴权的，置空等于当场降权。
   // 会话列表 / 单会话吊销也已把停用置为拒绝条件，这里是同一判定在 token 通道上的对应实现。
   const disabled = user.disabledAt !== null;

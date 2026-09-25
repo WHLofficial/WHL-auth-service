@@ -203,7 +203,7 @@ test("注册码名额：同名并发注册只消耗成功那一次（F-F）", as
   assert.equal(after - before, 1, `只有建号成功那次可以消耗名额（失败侧必须退还），实际 +${after - before}`);
 });
 
-// —— 透明重哈希（增量 9，TECH_DESIGN §8 第 1 条）——
+// —— 透明重哈希（v3.0.0，TECH_DESIGN §8 第 1 条）——
 
 /** 按指定迭代数造一份与产品同格式的存档哈希（Node 与 workerd 的 WebCrypto PBKDF2 同为原生实现） */
 async function legacyHash(password, iterations) {

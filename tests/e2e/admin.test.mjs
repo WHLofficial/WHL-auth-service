@@ -1,4 +1,4 @@
-// 管理机器端点（增量 8，PRD P1-1）：把管理能力落到 auth，修 tour 管理台的 6 处死写。
+// 管理机器端点（v2.0.0，PRD P1-1）：把管理能力落到 auth，修 tour 管理台的 6 处死写。
 // 覆盖：机器门（无签/伪签/跨路径签名 401）、目录、列表（q + keyset 翻页 + 不带会话）、详情、
 //   角色增删与审计、权限点额外授予（含 userinfo 当场生效与跨系统隔离）、重置密码（连带会话全吊销 +
 //   must_change_pw + 临时密码真能登录）、解锁、停用/启用（登录被拒 + userinfo 清空角色权限 + 踢下线）、
@@ -531,7 +531,7 @@ test("边界：不能对自己动手 / 缺参 400 / 未持有的角色键拒绝"
   assert.equal(missingAccount.json.error, "account_not_found");
 });
 
-test("身份查询（增量 9B）：批量返回 qq 映射、未绑定不出现、去重；空名单/>100 拒 400；缺签 401", { skip: SKIP }, async () => {
+test("身份查询（v3.0.0）：批量返回 qq 映射、未绑定不出现、去重；空名单/>100 拒 400；缺签 401", { skip: SKIP }, async () => {
   const c = machineClient();
   const u1 = await freshUser("lookup");
   const u2 = await freshUser("lookup");
@@ -566,7 +566,7 @@ test("身份查询（增量 9B）：批量返回 qq 映射、未绑定不出现�
   });
 });
 
-test("审计查询（增量 10）：筛选 account/event/时间窗、id 倒序游标分页、limit 夹取、时间格式校验", { skip: SKIP }, async () => {
+test("审计查询（v3.1.0）：筛选 account/event/时间窗、id 倒序游标分页、limit 夹取、时间格式校验", { skip: SKIP }, async () => {
   const c = machineClient();
   const u = await freshUser("auditq");
   // 制造已知审计行：注册一条 + 登录失败两条（错密码），事件类型与账号都可预期

@@ -1,4 +1,4 @@
-# 球队绑定迁移报告（增量 7）
+# 球队绑定迁移报告（v1.0.0）
 
 - 源：tour whl（team 20 / team_member 10）+ club whl-club（clubs 0 / club_bindings 0）
 - 产出：目录行 20、绑定 INSERT 10（SQL 见脚本 stdout，执行到 whl-auth）

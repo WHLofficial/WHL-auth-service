@@ -1,4 +1,4 @@
--- 球队绑定上收（增量 7 裁决，推翻本仓 TECH_DESIGN §5.3「球队不进 auth」旧裁定）：
+-- 球队绑定上收（v1.0.0 裁决，推翻本仓 TECH_DESIGN §5.3「球队不进 auth」旧裁定）：
 -- tour/club 双入口发码烧码，绑定关系唯一真源在本库；两侧经只读 D1 绑定（AUTH_DB）派生。
 -- team 是 tour team ↔ club club 的目录（1:1，未关联侧可空）；team_binding 一账号一队
 -- （UNIQUE(account_id)，与 tour team_member / club club_bindings 现行约束同口径），一队可多账号。

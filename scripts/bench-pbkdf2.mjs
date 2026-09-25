@@ -1,4 +1,4 @@
-// PBKDF2 迭代数档位压测（增量 9，TECH_DESIGN §12 假设 5 的决策依据）。
+// PBKDF2 迭代数档位压测（v3.0.0，TECH_DESIGN §12 假设 5 的决策依据）。
 // Node 与 workerd 的 WebCrypto PBKDF2 都是底层原生实现，本机数据作量级参考；
 // 最终口径 = 本档位派生耗时相对 Free 档 10ms CPU 上限的余量 + 本地 wrangler dev 登录端到端增幅。
 // 用法：node scripts/bench-pbkdf2.mjs [iterations ...]（缺省 25000 50000 100000，各 5 轮取中位数）
