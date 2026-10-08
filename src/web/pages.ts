@@ -1,12 +1,13 @@
 import type { SessionUser } from "../env";
 import { esc, page } from "./layout";
 
-/** 首页登出下方的三系统入口；域名与 migrations/0003_oidc.sql 登出白名单一致 */
+/** 首页登出下方的三系统入口；域名与 migrations/0003_oidc.sql 登出白名单一致。
+ *  hidden: true = 暂不展示，留形给以后要藏某个入口时用（生效依赖 layout.ts 里的 [hidden] 规则）。 */
 const SYSTEM_LINKS: { label: string; url: string; cls: string; hidden?: boolean }[] = [
   { label: "去赛事平台", url: "https://tour.whleague.win/", cls: "jump-tour" },
   { label: "去竞猜系统", url: "https://guess.whleague.win/", cls: "jump-guess" },
-  // club 入口暂不展示（2026-09-14 决定先 hidden），恢复时删掉 hidden: true
-  { label: "去俱乐部平台", url: "https://club.whleague.win/", cls: "jump-club", hidden: true },
+  // club 入口 2026-09-14 先 hidden、2026-10-08 恢复开放（隐藏期间 hidden 被 a.jump 的 display 压过，实际一直可见）
+  { label: "去俱乐部平台", url: "https://club.whleague.win/", cls: "jump-club" },
 ];
 
 export function loginPage(opts: { csrf: string; next?: string; error?: string }): string {

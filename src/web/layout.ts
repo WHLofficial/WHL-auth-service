@@ -13,6 +13,8 @@ export function esc(value: string): string {
 const STYLE = `
 :root { color-scheme: light; }
 * { box-sizing: border-box; }
+/* 作者样式里的 display（如 a.jump）会压过 UA 的 [hidden]，补回来让 hidden 属性真生效 */
+[hidden] { display: none !important; }
 body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
   background: #f4f5f7; color: #1c1e21;
   font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }

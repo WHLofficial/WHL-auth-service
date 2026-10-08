@@ -158,7 +158,7 @@ test("改密的三类拒绝：缺 CSRF 403、新密码太弱 400、旧密码错 
   assert.equal((await H.signIn(fresh, u.name, PW)).status, 303, "原密码仍应有效");
 });
 
-test("首页入口：改密码在登出上方，三系统跳转在登出下方（club 先 hidden）", async () => {
+test("首页入口：改密码在登出上方，三系统跳转在登出下方（club 已开放）", async () => {
   const u = await freshUser("homeentry");
   const r = await u.client.get("/");
   assert.equal(r.status, 200, "登录后应能访问首页");
@@ -175,7 +175,10 @@ test("首页入口：改密码在登出上方，三系统跳转在登出下方�
   const clubIdx = html.indexOf('href="https://club.whleague.win/"');
   assert.notEqual(tourIdx, -1, "应有去赛事平台跳转");
   assert.notEqual(guessIdx, -1, "应有去竞猜系统跳转");
-  assert.notEqual(clubIdx, -1, "club 按钮应保留在 DOM（hidden）");
-  assert.ok(tourIdx > logoutIdx && guessIdx > logoutIdx, "赛事/竞猜跳转应在登出按钮下方");
-  assert.match(html, /<a class="jump jump-club" hidden href="https:\/\/club\.whleague\.win\/">/, "club 入口应带 hidden 属性");
+  assert.notEqual(clubIdx, -1, "应有去俱乐部平台跳转");
+  assert.ok(tourIdx > logoutIdx && guessIdx > logoutIdx && clubIdx > logoutIdx, "三系统跳转应在登出按钮下方");
+  // v3.2.1：club 入口正式开放——锚点不带 hidden 才算开放
+  assert.match(html, /<a class="jump jump-club" href="https:\/\/club\.whleague\.win\/">/, "club 入口应开放（锚点不带 hidden）");
+  // hidden 机制的真伪：作者样式里的 a.jump{display:block} 会压过 UA 的 [hidden]，STYLE 里没这条就等于 hidden 不存在
+  assert.match(html, /\[hidden\] \{ display: none !important; \}/, "样式里应有 [hidden] 规则，hidden 属性才真生效");
 });
