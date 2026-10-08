@@ -54,8 +54,24 @@ function writeTestConfig() {
   return path;
 }
 
+// 本机（Windows + wrangler 4.x）实测：d1 子命令偶发「语句已执行、进程却不退出」。所以所有 d1 调用带超时，
+// 超时按瞬时抖动重试——避免整个套件无限挂死；种子是 INSERT OR REPLACE，重试无副作用。
 function wrangler(args, opts = {}) {
-  return execFileSync(process.execPath, [WRANGLER, ...args], { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...opts });
+  const { attempts = 3, timeout: timeoutMs = 30_000, ...rest } = opts;
+  for (let i = 1; ; i++) {
+    try {
+      return execFileSync(process.execPath, [WRANGLER, ...args], {
+        cwd: ROOT,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: timeoutMs,
+        ...rest,
+      });
+    } catch (err) {
+      if (err?.code !== "ETIMEDOUT" || i >= attempts) throw err;
+      console.warn(`==> ${args[0]} ${args[1] ?? ""} 超时未退出（第 ${i} 次），重试`);
+    }
+  }
 }
 
 // 播种：一个测试用 RP（回调/back-channel 端口由各测试自己回填）+ 一张长期有效的注册码。
@@ -110,7 +126,14 @@ async function main(attempt = 0) {
   const testConfig = writeTestConfig();
 
   console.log("==> 迁移本地 D1（隔离目录 .wrangler/test-state，不碰开发实例的库）");
-  wrangler(["d1", "migrations", "apply", DB, "--local", "--persist-to", STATE], { stdio: "inherit" });
+  // 本机（Windows + wrangler 4.x）实测：migrations apply 打完迁移表后进程不退出（timeout 复现 exit=124），
+  // 但迁移已落库。重跑一次通常快速返回；两次都超时才按「已完成」继续（迁移真失败时下游测试会红）。
+  try {
+    wrangler(["d1", "migrations", "apply", DB, "--local", "--persist-to", STATE], { stdio: "inherit", attempts: 2, timeout: 60_000 });
+  } catch (err) {
+    if (err?.code !== "ETIMEDOUT") throw err;
+    console.warn("==> 迁移命令两次都未自行退出，已强杀（迁移表已打印，按完成处理）");
+  }
 
   const port = Number(process.env.AUTH_TEST_PORT || 0) || (await freePort());
   const base = `http://127.0.0.1:${port}`;

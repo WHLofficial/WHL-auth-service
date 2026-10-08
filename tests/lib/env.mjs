@@ -10,18 +10,23 @@ const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),
 
 // wrangler 在 Windows 上对同一 persist 目录偶发 "fetch failed" / libuv assertion
 // （dev server 正在占用 .wrangler/state 时的瞬时冲突），退避重试即可，非数据问题。
-function cli(args, opts = {}, { retries = 6, delayMs = 350 } = {}) {
+// 另外本机（wrangler 4.x）实测 d1 子命令偶发「语句已执行、进程却不退出」：加超时把无限挂死变成有界失败，
+// 超时按瞬时抖动重试（各调用点的 SQL 都是幂等/可重复执行的断言查询与清理，重试无副作用）。
+function cli(args, opts = {}, { retries = 6, delayMs = 350, timeoutMs = 30_000 } = {}) {
   for (let i = 0; ; i++) {
     try {
       return execFileSync(process.execPath, [WRANGLER, ...args], {
         cwd: ROOT,
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
+        timeout: timeoutMs,
         ...opts,
       });
     } catch (e) {
       const out = `${e.stdout ?? ""}${e.stderr ?? ""}`;
-      const transient = /fetch failed|Assertion failed|ECONNRESET|EBUSY|SQLITE_BUSY|database is locked/i.test(out);
+      const transient =
+        e?.code === "ETIMEDOUT" ||
+        /fetch failed|Assertion failed|ECONNRESET|EBUSY|SQLITE_BUSY|database is locked/i.test(out);
       if (!transient || i >= retries) throw e;
       sleepSync(delayMs * (i + 1));
     }
