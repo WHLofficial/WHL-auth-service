@@ -68,7 +68,7 @@
 | `GET /.well-known/openid-configuration`、`/jwks.json` | 发现与验签公钥（私钥存 Worker Secret，`kid` 支持轮换） |
 | `POST /revoke` | 吊销 access/refresh token |
 | `GET/POST /logout` | 吊销 auth 会话 + 该会话签发的全部 token；back-channel POST 各 client `backchannel_logout_uri`（logout_token JWT） |
-| `POST /api/admin/*`（v2.0.0，12 条） | 管理能力机器端点，**POST-only + HMAC 验签**（与球队绑定共用 `machineGate`，密钥 `BIND_SECRET`，契约 `X-Sign = hex(HMAC-SHA256(secret,"POST\|path\|ts\|raw"))`）：`accounts/list`、`accounts/detail`、`catalog`、`accounts/roles`、`accounts/grants`、`accounts/password`、`accounts/unlock`、`accounts/disable`、`sessions/revoke`、`org-settings`、`signup-codes/create`、`signup-codes/list`。调用方是 tour 管理台（`worker/lib/authAdmin.ts`）；操作者身份由 tour 会话决定后作 `actor_id` 传入，auth 侧只认 HMAC 不认人（鉴权由调用方的权限点 `tour.accounts.manage` / `tour.org.settings` 负责），操作结果由 auth 记审计、tour 另记一份本地审计 |
+| `POST /api/admin/*`（v2.0.0，v4.0.0 双因子） | 管理能力机器端点，**POST-only + 服务签名 + 管理员令牌**。服务签名：`X-Sign = hex(HMAC-SHA256(ADMIN_SECRET,"POST\|path\|ts\|nonce\|raw"))`，`X-Timestamp` ±300s，`X-Nonce` 单次有效（落 `hmac_nonce` 去重）；管理员身份：`X-Actor-Token` / `Authorization: Bearer` 的 access token，`aud = ADMIN_AUDIENCE`，auth 侧按 `sub` 重查权限点（`tour.accounts.manage` / `tour.org.settings`）。**不再信任 body 的 `actor_id`，也不再与球队绑定共用 `BIND_SECRET`**。超管须已启用 TOTP，否则 `mfa_required`。端点：`accounts/list`、`accounts/detail`、`catalog`、`accounts/roles`、`accounts/grants`、`accounts/password`、`accounts/unlock`、`accounts/disable`、`sessions/revoke`、`org-settings`、`signup-codes/create`、`signup-codes/list`。调用方是 tour 管理台（`worker/lib/authAdmin.ts`），操作结果由 auth 记审计（`actor_id` 来自 token）、tour 另记一份本地审计 |
 
 ## 4. 部署形态（任务书问题 6）——结论：纯 Workers + Static Assets
 
@@ -400,7 +400,7 @@ userinfo 按 access token 的 `aud` 只返回**该 client 的**角色与权限�
 
 1. DNS/域名：auth.whleague.win Worker 自定义域；club.whleague.win。
 2. CF 盾：auth 域名**不启** Browser 挑战（否则 authorize 跳转被拦截）；确认 tour 现有盾对浏览器透明（探测发现 tour 有质询页，浏览器应正常，需实测）。
-3. Secrets：`AUTH_JWT_PRIVATE_KEY`（RS256，`kid` 支持轮换）、`AUTH_BIND_SECRET`（插件用，独立于 guess 的 SYNC_SECRET）、CSRF/cookie 密钥。
+3. Secrets：`AUTH_JWT_PRIVATE_KEY`（RS256，`kid` 支持轮换）、`BIND_SECRET`（QQ 插件绑定 + identity/lookup）、`ADMIN_SECRET`（管理通道 HMAC，必须独立于 BIND_SECRET）、`MFA_ENC_KEY`（32 字节随机值，TOTP secret 静态加密）、`COOKIE_DOMAIN`；`ADMIN_AUDIENCE` 默认 `tour`。
 4. D1：建 `whl-auth` 库 + migrations；KV：auth 自建 namespace（限流），兼容期额外绑定共享 KV（写 `sess:*`，收口后移除）。
 5. observability + alarm（错误率/限流命中）。
 

@@ -20,7 +20,7 @@ export function roleFromRoleRows(rows: { app_id: string | null; role_key: string
 
 export async function loadAccountUser(c: Context<AppEnv>, accountId: number): Promise<AccountUser | null> {
   const account = await c.env.DB.prepare(
-    "SELECT id, name, email, locked, must_change_pw, disabled_at FROM account WHERE id = ?",
+    "SELECT id, name, email, locked, must_change_pw, disabled_at, totp_enabled_at FROM account WHERE id = ?",
   )
     .bind(accountId)
     .first<{
@@ -30,6 +30,7 @@ export async function loadAccountUser(c: Context<AppEnv>, accountId: number): Pr
       locked: number;
       must_change_pw: number;
       disabled_at: string | null;
+      totp_enabled_at: string | null;
     }>();
   if (!account) return null;
   const roles = await c.env.DB.prepare(
@@ -44,6 +45,7 @@ export async function loadAccountUser(c: Context<AppEnv>, accountId: number): Pr
     role: roleFromRoleRows(roles.results),
     locked: account.locked === 1,
     mustChangePassword: account.must_change_pw === 1,
+    mfaEnabled: account.totp_enabled_at !== null,
     disabledAt: account.disabled_at,
   };
 }

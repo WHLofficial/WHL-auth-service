@@ -81,6 +81,63 @@ ${opts.next ? `<input type="hidden" name="next" value="${esc(opts.next)}">` : ""
   );
 }
 
+/** 登录第二步：TOTP 验证码或一次性恢复码 */
+export function mfaChallengePage(opts: { csrf: string; next?: string; error?: string }): string {
+  return page(
+    "两步验证",
+    `<p class="sub">请输入身份验证器里的 6 位验证码；验证器丢了可以用一个恢复码。</p>
+${opts.error ? `<p class="msg">${esc(opts.error)}</p>` : ""}
+<form method="post" action="/mfa">
+<input type="hidden" name="csrf" value="${esc(opts.csrf)}">
+${opts.next ? `<input type="hidden" name="next" value="${esc(opts.next)}">` : ""}
+<label for="code">验证码或恢复码</label>
+<input id="code" name="code" inputmode="text" autocomplete="one-time-code" maxlength="32" required autofocus>
+<button type="submit">验证</button>
+</form>
+<p class="foot"><a href="/login">重新登录</a></p>`,
+  );
+}
+
+/** 超管首次登录必须经过这里；普通用户也可以主动启用 */
+export function mfaSetupPage(opts: {
+  csrf: string;
+  secret: string;
+  otpauth: string;
+  next?: string;
+  error?: string;
+}): string {
+  return page(
+    "启用两步验证",
+    `<p class="sub">用身份验证器（Google Authenticator、1Password 等）扫描或手动录入下面的密钥，然后输入生成的 6 位验证码。</p>
+${opts.error ? `<p class="msg">${esc(opts.error)}</p>` : ""}
+<dl>
+<div class="kv"><dt>密钥</dt><dd><code>${esc(opts.secret)}</code></dd></div>
+<div class="kv"><dt>配置链接</dt><dd><code style="word-break:break-all">${esc(opts.otpauth)}</code></dd></div>
+</dl>
+<form method="post" action="/mfa/setup">
+<input type="hidden" name="csrf" value="${esc(opts.csrf)}">
+${opts.next ? `<input type="hidden" name="next" value="${esc(opts.next)}">` : ""}
+<label for="password">当前密码（确认是你本人）</label>
+<input id="password" name="password" type="password" autocomplete="current-password" required>
+<label for="code">验证器里的 6 位验证码</label>
+<input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+<button type="submit">启用并继续</button>
+</form>
+<p class="foot"><a href="/logout">先登出</a></p>`,
+  );
+}
+
+/** 恢复码只显示这一次；不落明文、不做下载，用户自行抄走 */
+export function mfaRecoveryPage(opts: { codes: string[]; next?: string }): string {
+  const next = opts.next && opts.next !== "/" ? opts.next : "/";
+  return page(
+    "保存恢复码",
+    `<p class="sub">两步验证已启用。下面 8 个恢复码每个只能用一次，请现在保存到安全的地方；离开此页后无法再次查看。</p>
+<ul>${opts.codes.map((code) => `<li><code>${esc(code)}</code></li>`).join("")}</ul>
+<p class="foot"><a href="${esc(next)}">我已保存，继续</a></p>`,
+  );
+}
+
 export function homePage(opts: {
   csrf: string;
   user: SessionUser;
@@ -101,6 +158,7 @@ ${u.mustChangePassword ? `<p class="notice">密码刚被重置，请先<a href="
 <div class="kv"><dt>昵称</dt><dd>${esc(u.name)}</dd></div>
 <div class="kv"><dt>角色</dt><dd>${roleLabel}</dd></div>
 <div class="kv"><dt>QQ 绑定</dt><dd>${qqCell}</dd></div>
+<div class="kv"><dt>两步验证</dt><dd>${u.mfaEnabled ? "已启用" : `<a href="/mfa/setup">去启用</a>`}</dd></div>
 ${u.locked ? `<div class="kv"><dt>账号状态</dt><dd>受限（观众号），解锁前不能绑队</dd></div>` : ""}
 </dl>
 <a class="btn2" href="/password">改密码</a>

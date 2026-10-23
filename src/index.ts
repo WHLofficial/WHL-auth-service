@@ -1,6 +1,8 @@
 import { Hono } from "hono";
 import type { AppEnv } from "./env";
 import { contentSecurityPolicy } from "./lib/csp";
+import { clearExpiredHmacNonces } from "./lib/hmac";
+import { clearExpiredMfa } from "./lib/mfa";
 import { clearExpiredLimits } from "./lib/ratelimit";
 import { getSessionUser } from "./lib/session";
 import routes from "./routes/pages";
@@ -22,7 +24,7 @@ app.use(async (c, next) => {
 // 放行的只有改密/登出/登录自身、静态契约（healthz/.well-known/jwks）与不依赖会话的机器端点。
 // /authorize 挪出中间件门禁：must_change_pw 的处理移入 authorize handler（oidc.ts），
 // 因为 prompt=none 静默探测要按规范回 RP 错误而不是跳改密页，而回跳目标必须先过 client 校验
-const PW_EXEMPT_PATHS = new Set(["/healthz", "/login", "/password", "/logout", "/jwks.json", "/userinfo", "/token", "/revoke", "/authorize"]);
+const PW_EXEMPT_PATHS = new Set(["/healthz", "/login", "/password", "/logout", "/jwks.json", "/userinfo", "/token", "/revoke", "/authorize", "/mfa", "/mfa/setup"]);
 function pwExempt(path: string): boolean {
   return PW_EXEMPT_PATHS.has(path) || path.startsWith("/.well-known/") || path.startsWith("/api/");
 }
@@ -32,6 +34,21 @@ app.use(async (c, next) => {
   if (pwExempt(path)) return next();
   const search = new URL(c.req.url).search;
   return c.redirect(`/password?next=${encodeURIComponent(path + search)}`, 303);
+});
+
+// 超管 MFA 门禁（v4.0.0）：未启用 TOTP 的超管只能进设置页/改密/登出/静态契约。
+// /authorize 由 handler 自己处理（prompt=none 要回 OIDC 错误而不是 302 到设置页）；
+// /api/ 与 OIDC 协议端点走 token/HMAC，由各自 handler 校验 mfa_enabled，不能把 cookie 门禁
+// 套到 Bearer 请求上（否则带 cookie 的 /userinfo 会收到 303 HTML）。
+const MFA_EXEMPT_PATHS = new Set(["/mfa", "/mfa/setup", "/password", "/logout", "/healthz", "/jwks.json", "/userinfo", "/token", "/revoke"]);
+app.use(async (c, next) => {
+  const user = c.get("user");
+  if (!user || user.role !== "superadmin" || user.mfaEnabled) return next();
+  const path = c.req.path;
+  if (MFA_EXEMPT_PATHS.has(path) || path.startsWith("/.well-known/") || path === "/authorize" || path.startsWith("/api/")) {
+    return next();
+  }
+  return c.redirect("/mfa/setup", 303);
 });
 
 // 基础安全响应头：页面不允许被嵌入、不允许缓存；无脚本，CSP 只放行内联样式与同源表单
@@ -67,5 +84,7 @@ export default {
   fetch: app.fetch,
   scheduled: async (_event: unknown, env: AppEnv["Bindings"]) => {
     await clearExpiredLimits(env);
+    await clearExpiredHmacNonces(env);
+    await clearExpiredMfa(env);
   },
 };

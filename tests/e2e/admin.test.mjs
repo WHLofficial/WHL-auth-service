@@ -3,15 +3,17 @@
 //   角色增删与审计、权限点额外授予（含 userinfo 当场生效与跨系统隔离）、重置密码（连带会话全吊销 +
 //   must_change_pw + 临时密码真能登录）、解锁、停用/启用（登录被拒 + userinfo 清空角色权限 + 踢下线）、
 //   强制下线（单会话 / 整账号 / 不存在 404）、组织设置读写、注册码创建与列表（码必须真能注册）。
-// 未配 BIND_SECRET 时整文件跳过（与 run.mjs 的读法一致：.dev.vars → 环境变量）。
+// 管理端 v4.0.0 起用 ADMIN_SECRET 签机器请求 + 服务端校验 X-Actor-Token；
+// identity/lookup 仍走 BIND_SECRET（v3.0.0 的 QQ 插件通道）。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHmac } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { Client } from "../lib/client.mjs";
 import * as H from "../lib/harness.mjs";
 
 const BIND_SECRET = process.env.BIND_SECRET || "";
-const SKIP = BIND_SECRET ? false : "未配 BIND_SECRET，管理机器端点测试跳过";
+const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
+const SKIP = ADMIN_SECRET && BIND_SECRET ? false : "未配 ADMIN_SECRET/BIND_SECRET，管理机器端点测试跳过";
 const PW = "TestPass123";
 const CODE_ALPHABET = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]+$/;
 // 测试 RP 的固定回调（不做真实回跳，只读 Location 里的 code）
@@ -22,24 +24,27 @@ const Q = (s) => `'${String(s).replace(/'/g, "''")}'`;
 const nowIso = () => new Date().toISOString();
 const countOf = (sql) => H.sql(sql)[0].n;
 
-function sign(path, raw, ts) {
-  return createHmac("sha256", BIND_SECRET).update(`POST|${path}|${ts}|${raw}`).digest("hex");
+function sign(secret, path, raw, ts, nonce) {
+  const canonical = nonce ? `POST|${path}|${ts}|${nonce}|${raw}` : `POST|${path}|${ts}|${raw}`;
+  return createHmac("sha256", secret).update(canonical).digest("hex");
 }
 
-// raw 传字符串可构造非法 JSON；不传 body 走空串（签名对空串同样成立，读类端点允许无 body）
+// raw 传字符串可构造非法 JSON；不传 body 走空串（签名对空串同样成立，读类端点允许无 body）。
+// 管理端：ADMIN_SECRET + 一次性 nonce + 真实用户 access token；identity/lookup 仍走 BIND_SECRET。
 async function adminPost(c, path, body, { badSign = false, raw, signedPath } = {}) {
   const text = raw ?? (body === undefined ? "" : JSON.stringify(body));
   const ts = Math.floor(Date.now() / 1000);
-  return c.raw(path, {
-    method: "POST",
-    retry: false,
-    headers: {
-      "content-type": "application/json",
-      "x-timestamp": String(ts),
-      "x-sign": badSign ? "deadbeef" : sign(signedPath ?? path, text, ts),
-    },
-    body: text,
-  });
+  const isService = path === "/api/admin/identity/lookup";
+  const nonce = isService ? undefined : randomBytes(16).toString("hex");
+  const secret = isService ? BIND_SECRET : ADMIN_SECRET;
+  const headers = {
+    "content-type": "application/json",
+    "x-timestamp": String(ts),
+    "x-sign": badSign ? "deadbeef" : sign(secret, signedPath ?? path, text, ts, nonce),
+  };
+  if (nonce) headers["x-nonce"] = nonce;
+  if (!isService) headers["x-actor-token"] = (await adminActor()).token;
+  return c.raw(path, { method: "POST", retry: false, headers, body: text });
 }
 
 async function admin(c, path, body, opts) {
@@ -56,10 +61,8 @@ async function admin(c, path, body, opts) {
 // 每个用例独立 Client（随机 IP）：机器桶 300/15min 互不干扰
 const machineClient = () => new Client(H.BASE);
 
-// 首个注册账号按设计会成为全局 superadmin（src/routes/pages.ts「首个用户 = superadmin」），
-// 会让本文件第一个 freshUser 拿到超管身份、把后面所有「超管受保护」的断言搅乱。
-// 先在库里放一个哑账号占住「首个」，此后所有注册用户就都是普通的 tour.coach + club.coach；
-// 需要超管目标的用例直接用它（它没有 credential，登不进来，只作被操作对象）。
+// v4.0.0 起注册不再产生超管；保留一个受保护超管目标，用于断言
+// 「不得改角色 / 重置密码 / 停用超管」。它没有 credential，登不进来，只作被操作对象。
 let rootCache;
 function rootId() {
   if (rootCache === undefined) {    H.sqlExec(
@@ -117,6 +120,24 @@ async function accessTokenOfAs(user, clientId) {
 }
 
 const accessTokenOf = (user) => accessTokenOfAs(user, H.TEST_APP);
+
+// 管理端调用者：真实会话 + 全局 superadmin + 已启用 MFA。
+// 注册拿到会话后再补角色/标记 enabled，避免重放登录流程触发 MFA 挑战；
+// access token 的 aud=test-rp，由测试环境的 ADMIN_AUDIENCE=test-rp 接受。
+let actorCachePromise;
+function adminActor() {
+  actorCachePromise ??= (async () => {
+    const u = await freshUser("aadmin-actor");
+    H.sqlExec(
+      `INSERT OR IGNORE INTO user_role (account_id, role_id, granted_by, granted_at)
+       SELECT ${u.id}, (SELECT id FROM role WHERE app_id IS NULL AND key = 'superadmin'), NULL, ${Q(nowIso())};`,
+    );
+    H.sqlExec(`UPDATE account SET totp_enabled_at = ${Q(nowIso())} WHERE id = ${u.id};`);
+    const tok = await accessTokenOf(u);
+    return { ...u, token: tok.access_token };
+  })();
+  return actorCachePromise;
+}
 
 /** 临时把某个真实 client（tour/guess/club）的回调地址指到本地假 RP，用完必须还原——别的测试文件依赖种子里的生产地址。 */
 async function useRealAppEndpoints(clientId, body) {
@@ -255,7 +276,7 @@ test("角色授权：差集写入 + role.grant/revoke 审计含操作者 + 幂�
   const detail = JSON.parse(
     H.sql("SELECT detail FROM audit_log WHERE event = 'role.grant' ORDER BY id DESC LIMIT 1;")[0].detail,
   );
-  assert.equal(detail.actor_id, actor.id, "审计应记下操作者");
+  assert.equal(detail.actor_id, (await adminActor()).id, "审计应记下 token 对应的操作者，而非请求体");
   assert.equal(detail.role, "guess.admin");
 
   // 传全集 = 幂等：重复保存同一状态零写入、零审计（界面可以放心地反复保存）
@@ -514,7 +535,7 @@ test("边界：不能对自己动手 / 缺参 400 / 未持有的角色键拒绝"
   const actor = await freshUser("aedge");
   const target = await freshUser("aedge-target");
 
-  const self = await admin(c, "/api/admin/accounts/password", { account_id: actor.id, actor_id: actor.id });
+  const self = await admin(c, "/api/admin/accounts/password", { account_id: (await adminActor()).id, actor_id: actor.id });
   assert.equal(self.status, 403);
   assert.equal(self.json.error, "self_forbidden");
 

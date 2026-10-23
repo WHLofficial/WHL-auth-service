@@ -139,8 +139,15 @@ async function main(attempt = 0) {
   const base = `http://127.0.0.1:${port}`;
   console.log(`==> 启动隔离实例 ${base}`);
 
+  // 管理端与 MFA 用测试专用临时密钥：不读 .dev.vars、不落盘。
+  const adminSecret = randomBytes(24).toString("hex");
+  const mfaKey = randomBytes(32).toString("hex");
   const fd = openSync(LOG, "a");
-  dev = spawn(process.execPath, [WRANGLER, "dev", "--config", testConfig, "--port", String(port), "--persist-to", STATE, "--log-level", "info"], {
+  dev = spawn(process.execPath, [WRANGLER, "dev", "--config", testConfig, "--port", String(port), "--persist-to", STATE, "--log-level", "info",
+    "--var", `ADMIN_SECRET:${adminSecret}`,
+    "--var", `MFA_ENC_KEY:${mfaKey}`,
+    "--var", "ADMIN_AUDIENCE:test-rp",
+  ], {
     cwd: ROOT,
     stdio: ["ignore", fd, fd],
   });
@@ -190,6 +197,9 @@ async function main(attempt = 0) {
     AUTH_SIGNUP_CODE: signupCode,
     AUTH_TEST_APP: "test-rp",
     BIND_SECRET: readDevVars().BIND_SECRET || "",
+    ADMIN_SECRET: adminSecret,
+    MFA_ENC_KEY: mfaKey,
+    ADMIN_AUDIENCE: "test-rp",
   };
   const r = await runTests(
     ["--import", pathToFileURL(join(ROOT, "tests", "lib", "loader.mjs")).href, "--test", "--test-concurrency=1", "--test-reporter=spec", ...files],

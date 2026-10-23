@@ -60,7 +60,7 @@ export async function getSessionUser(c: Context<AppEnv>): Promise<SessionUser | 
   // cookie 的 Max-Age 只在浏览器侧生效，被复制的 token 不受它约束。
   const sessionHash = await sha256Hex(token);
   const row = await c.env.DB.prepare(
-    `SELECT a.id, a.name, a.locked, a.must_change_pw, a.disabled_at, s.revoked_at, s.expires_at, s.last_seen_at
+    `SELECT a.id, a.name, a.locked, a.must_change_pw, a.disabled_at, a.totp_enabled_at, s.revoked_at, s.expires_at, s.last_seen_at
        FROM session s JOIN account a ON a.id = s.account_id
       WHERE s.token_hash = ?`,
   )
@@ -71,6 +71,7 @@ export async function getSessionUser(c: Context<AppEnv>): Promise<SessionUser | 
       locked: number;
       must_change_pw: number;
       disabled_at: string | null;
+      totp_enabled_at: string | null;
       revoked_at: string | null;
       expires_at: string;
       last_seen_at: string | null;
@@ -90,6 +91,7 @@ export async function getSessionUser(c: Context<AppEnv>): Promise<SessionUser | 
     role: roleFromRoleRows(roles.results),
     locked: row.locked === 1,
     mustChangePassword: row.must_change_pw === 1,
+    mfaEnabled: row.totp_enabled_at !== null,
   };
 }
 

@@ -2,11 +2,13 @@
 //
 // 为什么长这样：账号真源 2026-09-14 收口到本库后，tour 管理台的写操作仍打自己的库
 // （worker/routes/admin/accounts.ts 与 worker/routes/admin.ts 共 6 处死写），改角色/解锁/
-// 重置密码/开放注册开关/生成注册码全部失效。本轮把这些动作收口到本文件，走既有 HMAC 机器通道
-// （与 routes/machine.ts 同一把 BIND_SECRET、同一契约），tour 侧只做界面与权限门。
+// 重置密码/开放注册开关/生成注册码全部失效。本轮把这些动作收口到本文件。
 //
-// 鉴权边界（已拍板）：本文件的每个端点只验 HMAC——「谁有权做管理动作」仍由调用方（tour）用它自己的
-// 权限点（tour.accounts.manage / tour.org.settings）判定；操作者身份经 actor_id 带入审计。
+// 鉴权边界（v4.0.0 起，P0-2）：双因子。
+//   1) 服务因子：ADMIN_SECRET 的 HMAC 签名 + 每次请求唯一的 X-Nonce（防重放）；
+//   2) 用户因子：X-Actor-Token（某位管理员的 access token），服务端按 token 的 aud 与
+//      账号权限点（tour.accounts.manage / tour.org.settings）重新判定；超管需已启用 MFA。
+// 操作者身份只从 token.sub 取，body.actor_id 不再可信，仅作为兼容字段忽略。
 //
 // 性能约定（本增量硬要求：省 D1 读、缩短等待）：
 //   - 列表禁止 N+1：账号页 + 角色 IN 查询，两次读、一次往返两次；会话不进列表
@@ -19,6 +21,8 @@ import type { AppEnv } from "../env";
 import { auditStatement } from "../lib/audit";
 import { generateCode, hashPassword, PBKDF2_ITERATIONS, sha256Hex } from "../lib/crypto";
 import { int, machineGate, parseJson, str } from "../lib/machineGate";
+import { verifyAccessToken } from "../lib/oidc";
+import { permissionsFor } from "../lib/permissions";
 import {
   accountRevokeStatements,
   notifyBackchannel,
@@ -29,7 +33,7 @@ import { nowIso } from "../lib/util";
 
 const app = new Hono<AppEnv>();
 
-const bad = (c: Context<AppEnv>, error: string, message: string, status: 400 | 403 | 404 | 409) =>
+const bad = (c: Context<AppEnv>, error: string, message: string, status: 400 | 401 | 403 | 404 | 409) =>
   c.json({ error, message }, status);
 
 const rowsOf = <T,>(r: { results?: unknown[] } | undefined): T[] => (r?.results ?? []) as T[];
@@ -119,16 +123,72 @@ async function loadTarget(
   };
 }
 
-/** 机器端点的统一外壳：验签 → 解析 JSON → 取 actor_id（调用方传入，用于审计）。
- *  空请求体按 {} 处理：读类端点（目录、列表、设置读取）本来就不需要 body，签名对空串照样成立。 */
+/**
+ * 管理端服务端授权（v4.0.0）：HMAC 只证明「调用方服务可信」，不再等于「操作者可做任何事」。
+ * 还要求请求方带上某位管理员的 access token（X-Actor-Token: Bearer <token>），并按该 token
+ * 的 aud + 账号权限点重新判定权限；actor 身份也从 token 的 sub 取，不再信任 body.actor_id。
+ */
+async function requireAdminActor(
+  c: Context<AppEnv>,
+  permission: string,
+): Promise<{ err: Response } | { id: number; name: string }> {
+  const raw = c.req.header("X-Actor-Token") ?? c.req.header("Authorization") ?? "";
+  const token = raw.replace(/^Bearer\s+/i, "").trim();
+  if (!token) return { err: bad(c, "actor_required", "缺少管理员身份令牌", 401) };
+  const at = await verifyAccessToken(c.env, new URL(c.req.url).origin, token);
+  if (!at) return { err: bad(c, "invalid_actor", "管理员身份令牌无效或已过期", 401) };
+  const aud = c.env.ADMIN_AUDIENCE ?? "tour";
+  if (at.aud !== aud) return { err: bad(c, "wrong_audience", "该令牌不能用于管理接口", 403) };
+  const accountId = Number(at.sub);
+  if (!Number.isInteger(accountId) || accountId <= 0) {
+    return { err: bad(c, "invalid_actor", "管理员身份令牌无效", 401) };
+  }
+  const row = await c.env.DB.prepare(
+    `SELECT a.name, a.disabled_at, a.totp_enabled_at, ${IS_SUPER_SQL} FROM account a WHERE a.id = ?`,
+  )
+    .bind(accountId)
+    .first<{ name: string; disabled_at: string | null; totp_enabled_at: string | null; is_super: number }>();
+  if (!row || row.disabled_at) return { err: bad(c, "actor_forbidden", "操作者账号不可用", 403) };
+  // 超管未完成 MFA 设置前不得通过管理接口操作（与页面中间件同一口径）
+  if (row.is_super === 1 && !row.totp_enabled_at) {
+    return { err: bad(c, "mfa_required", "超管需先启用两步验证", 403) };
+  }
+  if (row.is_super !== 1) {
+    const perms = await permissionsFor(c, aud, accountId);
+    if (!perms.includes(permission)) {
+      return { err: bad(c, "forbidden", `缺少权限点 ${permission}`, 403) };
+    }
+  }
+  return { id: accountId, name: row.name };
+}
+
+/**
+ * 管理端点的统一外壳：ADMIN_SECRET 验签 + nonce 防重放 → 解析 JSON → 校验管理员 token/权限点。
+ * 空请求体按 {} 处理：读类端点（目录、列表、设置读取）本来就不需要 body，签名对空串照样成立。
+ */
 async function machineBody(
   c: Context<AppEnv>,
-): Promise<{ err: Response } | { body: Record<string, unknown>; actorId: number | undefined }> {
-  const gate = await machineGate(c);
+  permission = "tour.accounts.manage",
+): Promise<{ err: Response } | { body: Record<string, unknown>; actorId: number }> {
+  const gate = await machineGate(c, "admin");
   if ("err" in gate) return { err: gate.err };
   const body = gate.raw.trim() === "" ? {} : parseJson(gate.raw);
   if (!body) return { err: bad(c, "bad body", "请求体不是合法 JSON", 400) };
-  return { body, actorId: int(body.actor_id) ?? undefined };
+  const actor = await requireAdminActor(c, permission);
+  if ("err" in actor) return { err: actor.err };
+  return { body, actorId: actor.id };
+}
+
+/** 只读服务通道（guess 批量查 QQ 身份）：保留 BIND_SECRET，避免把没有用户 token 的后台服务
+ *  逼上管理通道；不写库、不返回管理数据。 */
+async function serviceBody(
+  c: Context<AppEnv>,
+): Promise<{ err: Response } | { body: Record<string, unknown> }> {
+  const gate = await machineGate(c, "bind");
+  if ("err" in gate) return { err: gate.err };
+  const body = gate.raw.trim() === "" ? {} : parseJson(gate.raw);
+  if (!body) return { err: bad(c, "bad body", "请求体不是合法 JSON", 400) };
+  return { body };
 }
 
 // ---------- 目录与账号读取 ----------
@@ -150,7 +210,7 @@ app.post("/api/admin/catalog", async (c) => {
 // 本地镜像快照，改实时查这里。只读、不记审计（照 catalog/list 先例）；一条 IN 查询（单批 ≤100），
 // 未绑定的 id 不出现在结果里。入参用 auth account.id（guess users.tour_id / tour user.id 同值）。
 app.post("/api/admin/identity/lookup", async (c) => {
-  const m = await machineBody(c);
+  const m = await serviceBody(c);
   if ("err" in m) return m.err;
   const ids = Array.isArray(m.body.account_ids)
     ? [...new Set(m.body.account_ids.map(int).filter((n): n is number => n !== null))]
@@ -669,7 +729,7 @@ app.post("/api/admin/audit/query", async (c) => {
 
 // 开放注册开关：不带 allow_open_reg = 读；带 = 写。哨兵值用 undefined 区分「没传」与「传了 false」。
 app.post("/api/admin/org-settings", async (c) => {
-  const m = await machineBody(c);
+  const m = await machineBody(c, "tour.org.settings");
   if ("err" in m) return m.err;
   if (typeof m.body.allow_open_reg !== "boolean") {
     const row = await c.env.DB.prepare("SELECT allow_open_reg FROM organization WHERE id = 1").first<{
@@ -689,7 +749,7 @@ app.post("/api/admin/org-settings", async (c) => {
 
 // 生成注册码：明码只在这条响应里出现一次（库存 sha256），审计只记指纹不记明码
 app.post("/api/admin/signup-codes/create", async (c) => {
-  const m = await machineBody(c);
+  const m = await machineBody(c, "tour.org.settings");
   if ("err" in m) return m.err;
   const maxUsesRaw = int(m.body.max_uses);
   const maxUses = maxUsesRaw !== null && maxUsesRaw > 0 ? maxUsesRaw : null; // null = 不限次
@@ -713,7 +773,7 @@ app.post("/api/admin/signup-codes/create", async (c) => {
 
 // 注册码使用记录：明码不可回查（只有 sha256），只给次数/过期/状态与不可逆指纹前缀
 app.post("/api/admin/signup-codes/list", async (c) => {
-  const m = await machineBody(c);
+  const m = await machineBody(c, "tour.org.settings");
   if ("err" in m) return m.err;
   const rows = await c.env.DB.prepare(
     `SELECT code_hash, max_uses, used_count, expires_at, created_by, created_at

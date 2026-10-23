@@ -6,6 +6,7 @@ import { loadAccountUser, type AccountUser } from "../lib/accounts";
 import { audit } from "../lib/audit";
 import { randomToken, sha256Hex } from "../lib/crypto";
 import { signRs256, signingKey, verifyAccessToken, verifyIdTokenHint, verifyPkce } from "../lib/oidc";
+import { permissionsFor } from "../lib/permissions";
 import { rateLimit } from "../lib/ratelimit";
 import { SESSION_COOKIE, destroySession, revokeSessionAndNotify } from "../lib/session";
 import { clientIp, nowIso, parseUris } from "../lib/util";
@@ -246,6 +247,15 @@ app.get("/authorize", async (c) => {
     const next = `/authorize${new URL(c.req.url).search}`;
     return c.redirect(`/login?next=${encodeURIComponent(next)}`, 303);
   }
+  // 超管未启用 TOTP：不允许发码（中间件对页面已拦，这里补 OIDC 入口）。
+  // prompt=none 仍按规范回 interaction_required，避免 RP 静默探测拿到 302 到设置页。
+  if (c.get("user")!.role === "superadmin" && !c.get("user")!.mfaEnabled) {
+    const next = `/authorize${new URL(c.req.url).search}`;
+    if (c.req.query("prompt") === "none") {
+      return c.redirect(oauthError(parsed.redirectUri, "interaction_required", "需要先启用两步验证", parsed.state), 303);
+    }
+    return c.redirect(`/mfa/setup?next=${encodeURIComponent(next)}`, 303);
+  }
   // must_change_pw 门禁（原在 index.ts 中间件，现移入此处——见 PW_EXEMPT_PATHS 注释）：
   // 普通请求跳改密页保 next 链路；prompt=none 探测按规范回 interaction_required，保持静默
   if (c.get("user")!.mustChangePassword) {
@@ -354,10 +364,14 @@ async function issueTokens(
   };
 }
 
-/** 角色 = user_role 授权投影（账号收口后唯一来源，§6.2）；按 aud 过滤防跨系统信息泄漏（§6.3） */
+/** 角色 = user_role 授权投影（账号收口后唯一来源，§6.2）；按 aud 过滤防跨系统信息泄漏（§6.3）。
+ *  全局角色只放行 superadmin：未来若新增全局角色，不能默认跨 aud 下发。 */
 async function rolesForAud(c: Context<AppEnv>, accountId: number, aud: string): Promise<string[]> {
   const rows = await c.env.DB.prepare(
-    "SELECT r.app_id AS app_id, r.key AS role_key FROM user_role ur JOIN role r ON ur.role_id = r.id WHERE ur.account_id = ? AND (r.app_id = ? OR r.app_id IS NULL)",
+    `SELECT r.app_id AS app_id, r.key AS role_key
+       FROM user_role ur JOIN role r ON ur.role_id = r.id
+      WHERE ur.account_id = ?
+        AND (r.app_id = ? OR (r.app_id IS NULL AND r.key = 'superadmin'))`,
   )
     .bind(accountId, aud)
     .all<{ app_id: string | null; role_key: string }>();
@@ -367,33 +381,9 @@ async function rolesForAud(c: Context<AppEnv>, accountId: number, aud: string): 
 }
 
 /**
- * 权限点 = 角色派生 ∪ 账号级额外授予（v2.0.0「权限点额外授予」，migrations/0009_admin.sql）。
- * 一条 UNION SQL 直出：原实现是「全表拉 role_permission 再在 JS 里按角色集过滤」，
- * 每台实例每次 userinfo 都要把多系统的映射全读一遍；改成按 account_id 收窄后，
- * 读的行数只与本账号的授权数相关，且和账号级授予一次取齐（不新增往返）。
- *
- * 角色派生分支与改造前逐字等价：R.app_id ∈ {aud, NULL} 且账号持有 R。全局角色（app_id IS NULL）
- * 仍按原样下发其全部权限点（superadmin 即如此拿到全部）；新增的账号级授予则收紧到 p.app_id = aud，
- * 防止在某个 aud 下泄出别的系统的权限点。
+ * 权限点 = 角色派生 ∪ 账号级额外授予（migrations/0009_admin.sql）。实现见 lib/permissions.ts，
+ * 管理端服务端校验与 userinfo 共用同一口径。
  */
-async function permissionsFor(c: Context<AppEnv>, aud: string, accountId: number): Promise<string[]> {
-  const rows = await c.env.DB.prepare(
-    `SELECT p.key AS perm_key
-       FROM user_role ur
-       JOIN role r ON r.id = ur.role_id
-       JOIN role_permission rp ON rp.role_id = r.id
-       JOIN permission p ON p.id = rp.permission_id
-      WHERE ur.account_id = ? AND (r.app_id = ? OR r.app_id IS NULL)
-     UNION
-     SELECT p.key AS perm_key
-       FROM account_permission ap
-       JOIN permission p ON p.id = ap.permission_id
-      WHERE ap.account_id = ? AND p.app_id = ?`,
-  )
-    .bind(accountId, aud, accountId, aud)
-    .all<{ perm_key: string }>();
-  return rows.results.map((r) => r.perm_key);
-}
 
 app.post("/token", async (c) => {
   if (!(await rateLimit(c.env, `token:${clientIp(c)}`, 30, 900))) {
@@ -453,6 +443,9 @@ app.post("/token", async (c) => {
       return oauthJsonError(c, "invalid_grant", "登录会话已结束，请重新登录");
     const user = await loadAccountUser(c, row.account_id);
     if (!user) return oauthJsonError(c, "invalid_grant", "账号不存在");
+    if (user.role === "superadmin" && !user.mfaEnabled) {
+      return oauthJsonError(c, "invalid_grant", "超管需先完成两步验证");
+    }
     const body = await issueTokens(c, {
       accountId: row.account_id,
       clientId,
@@ -473,7 +466,23 @@ app.post("/token", async (c) => {
     const row = await c.env.DB.prepare("SELECT * FROM oidc_refresh WHERE token_hash = ?").bind(tokenHash).first<OidcRefreshRow>();
     if (!row || row.client_id !== clientId) return oauthJsonError(c, "invalid_grant", "refresh token 无效");
     const now = nowIso();
-    // 原子轮换：同一 token 并发双花只有一个 UPDATE 成功，失败方一律按重用处理
+    // 刷新必须复查登录会话：会话登出/过期/账号停用后，refresh 不能继续续命（v4.0.0）
+    const sess = await c.env.DB.prepare(
+      "SELECT s.revoked_at, s.expires_at, a.disabled_at FROM session s JOIN account a ON a.id = s.account_id WHERE s.token_hash = ?",
+    )
+      .bind(row.session_hash)
+      .first<{ revoked_at: string | null; expires_at: string; disabled_at: string | null }>();
+    if (!sess || sess.revoked_at || sess.expires_at <= now || sess.disabled_at) {
+      return oauthJsonError(c, "invalid_grant", "登录会话已结束，请重新登录");
+    }
+    const user = await loadAccountUser(c, row.account_id);
+    if (!user) return oauthJsonError(c, "invalid_grant", "账号不存在");
+    if (user.disabledAt) return oauthJsonError(c, "invalid_grant", "账号已被停用");
+    if (user.role === "superadmin" && !user.mfaEnabled) {
+      return oauthJsonError(c, "invalid_grant", "超管需先完成两步验证");
+    }
+    // 原子轮换：同一 token 并发双花只有一个 UPDATE 成功，失败方一律按重用处理。
+    // 先做账号状态检查再轮换：停用/未完成 MFA 的账号不应因为一次失败的刷新丢掉 refresh token。
     const rotate = await c.env.DB.prepare(
       "UPDATE oidc_refresh SET rotated_at = ?, revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?",
     )
@@ -492,9 +501,6 @@ app.post("/token", async (c) => {
       }
       return oauthJsonError(c, "invalid_grant", "refresh token 无效、已轮换或已过期");
     }
-    const user = await loadAccountUser(c, row.account_id);
-    if (!user) return oauthJsonError(c, "invalid_grant", "账号不存在");
-    if (user.disabledAt) return oauthJsonError(c, "invalid_grant", "账号已被停用");
     // 刷新请求的 scope 参数按原 scope 处理（不支持缩窄，避免接入方误传把权限越刷越小）；
     // 刷新签发的 ID token 不带 nonce（OIDC Core §12.2）；沿用原 scope 与轮换族
     const body = await issueTokens(c, {

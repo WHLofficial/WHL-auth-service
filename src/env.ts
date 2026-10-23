@@ -12,6 +12,12 @@ export type Bindings = {
   AUTH_JWT_PRIVATE_KEY?: string;
   /** QQ 绑定通道密钥（积分插件 ↔ auth 机器端点验签，TECH_DESIGN §7.4）。独立密钥，不复用 guess 的 SYNC_SECRET */
   BIND_SECRET?: string;
+  /** 管理通道密钥（tour 管理台 ↔ /api/admin/*）。必须与 BIND_SECRET 分开：绑定插件泄漏不连带管理权 */
+  ADMIN_SECRET?: string;
+  /** 管理接口要求的 access token aud（默认 tour）；调用方 token 必须由本服务签发且 aud 精确匹配 */
+  ADMIN_AUDIENCE?: string;
+  /** TOTP secret 静态加密密钥（AES-GCM）。超管 MFA 必需；未配置时设置页拒绝启用 */
+  MFA_ENC_KEY?: string;
 };
 
 export type SessionUser = {
@@ -20,6 +26,7 @@ export type SessionUser = {
   role: Role;
   locked: boolean;
   mustChangePassword: boolean;
+  mfaEnabled: boolean;
 };
 
 export type AppEnv = {

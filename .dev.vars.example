@@ -2,6 +2,17 @@
 # 生产环境不要用 vars/文件，改用 wrangler secret：
 #   npx wrangler secret put COOKIE_DOMAIN         -> ".whleague.win"
 #   npx wrangler secret put AUTH_JWT_PRIVATE_KEY  -> node scripts/generate-oidc-key.mjs 生成
+#   npx wrangler secret put ADMIN_SECRET          -> 管理通道 HMAC，与 BIND_SECRET 必须不同
+#   npx wrangler secret put MFA_ENC_KEY           -> 32 字节随机值，TOTP secret 静态加密
 COOKIE_DOMAIN=.whleague.win
 # RS256 签名私钥（PKCS8 DER 单行 base64）；本地生成：node scripts/generate-oidc-key.mjs
 AUTH_JWT_PRIVATE_KEY=
+# 管理台机器通道：X-Sign 用 ADMIN_SECRET，管理员身份用 X-Actor-Token；本机可随便填长随机串
+ADMIN_SECRET=local-admin-secret-change-me
+# 管理端 token 的 aud；默认 tour
+ADMIN_AUDIENCE=tour
+# TOTP secret 加密密钥（32 字节 base64）；生成：node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+# 仅本地示例值；生产必须换成随机值，且上线后不要随意轮换（旧 TOTP secret 会解不开）
+MFA_ENC_KEY=local-mfa-key-change-me
+# QQ 插件绑定与 identity/lookup 机器通道；测试从 .dev.vars 读取
+BIND_SECRET=local-bind-secret-change-me

@@ -6,6 +6,10 @@ export type AuditEvent =
   | "login.ok"
   | "login.fail"
   | "login.rate_limited"
+  // 两步验证（v4.0.0）
+  | "login.mfa_required"
+  | "mfa.enable"
+  | "mfa.recovery_used"
   | "register.ok"
   | "register.rate_limited"
   | "pw.change"

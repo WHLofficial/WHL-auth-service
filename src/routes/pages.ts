@@ -5,7 +5,22 @@ import type { AppEnv } from "../env";
 import { audit, auditStatement } from "../lib/audit";
 import { csrfValid, ensureCsrfToken } from "../lib/csrf";
 import { PBKDF2_ITERATIONS, hashIterations, hashPassword, sha256Hex, verifyPassword } from "../lib/crypto";
+import {
+  claimTotpStep,
+  clearMfaChallenge,
+  consumeRecoveryCode,
+  createMfaChallenge,
+  enableTotp,
+  failMfaChallenge,
+  issueRecoveryCodes,
+  loadPendingSecret,
+  loadTotpRow,
+  readMfaChallenge,
+  savePendingSecret,
+} from "../lib/mfa";
 import { rateLimit, resetRateLimit } from "../lib/ratelimit";
+import { openSecret, sealSecret } from "../lib/secretBox";
+import { generateTotpSecret, otpauthUri, verifyTotp } from "../lib/totp";
 import {
   SESSION_COOKIE,
   createSession,
@@ -16,7 +31,18 @@ import {
   sessionsOfAccount,
 } from "../lib/session";
 import { clientIp, nowIso } from "../lib/util";
-import { bindPage, homePage, loginPage, passwordPage, registerPage, sessionsPage } from "../web/pages";
+import {
+  bindPage,
+  homePage,
+  loginPage,
+  mfaChallengePage,
+  mfaRecoveryPage,
+  mfaSetupPage,
+  oidcErrorPage,
+  passwordPage,
+  registerPage,
+  sessionsPage,
+} from "../web/pages";
 import { issueCode, parseAuthorize, runDetached } from "./oidc";
 
 const app = new Hono<AppEnv>();
@@ -119,7 +145,9 @@ app.post("/login", async (c) => {
   const [nameOk, row] = await Promise.all([
     rateLimit(c.env, `login-name:${ip}:${name}`, 5, 900),
     c.env.DB.prepare(
-      `SELECT a.id, a.locked, a.must_change_pw, a.disabled_at, cr.hash AS password_hash
+      `SELECT a.id, a.locked, a.must_change_pw, a.disabled_at, a.totp_enabled_at, cr.hash AS password_hash,
+              EXISTS(SELECT 1 FROM user_role ur JOIN role r ON r.id = ur.role_id
+                      WHERE ur.account_id = a.id AND r.app_id IS NULL AND r.key = 'superadmin') AS is_super
          FROM account a JOIN credential cr ON cr.account_id = a.id AND cr.type = 'password'
         WHERE a.name = ?`,
     )
@@ -129,7 +157,9 @@ app.post("/login", async (c) => {
         locked: number;
         must_change_pw: number;
         disabled_at: string | null;
+        totp_enabled_at: string | null;
         password_hash: string;
+        is_super: number;
       }>(),
   ]);
   if (!nameOk) {
@@ -153,6 +183,12 @@ app.post("/login", async (c) => {
     await audit(c, "login.fail", { accountId: row.id, detail: { name, reason: "disabled" } });
     return fail(401, "该账号已被停用，请联系管理员");
   }
+  // 已启用 TOTP：密码正确只算「第一步」，不发会话，先给 5 分钟挑战窗口
+  if (row.totp_enabled_at) {
+    await createMfaChallenge(c, row.id, safeNext(form.next));
+    await audit(c, "login.mfa_required", { accountId: row.id });
+    return c.redirect("/mfa", 303);
+  }
   const token = await createSession(c, row.id);
   const storedIters = hashIterations(row.password_hash);
   // 清账号限流 + audit login.ok 都不挡响应：waitUntil 后台（测试无 executionCtx 就地 await）
@@ -174,6 +210,11 @@ app.post("/login", async (c) => {
       }
     })(),
   );
+  // 超管未启用 TOTP：会话可以发，但全站中间件只放行 /mfa/setup 与登出
+  if (row.is_super === 1) {
+    const nx = safeNext(form.next);
+    return c.redirect(nx === "/" ? "/mfa/setup" : `/mfa/setup?next=${encodeURIComponent(nx)}`, 303);
+  }
   if (row.must_change_pw === 1) {
     // 带 next 进来的（如 OIDC authorize 跳转）把链路保住：改完密码直接回原目标
     const nx = safeNext(form.next);
@@ -198,13 +239,177 @@ async function resolvePostLoginTarget(
   return issueCode(c, { id: accountId }, parsed, await sha256Hex(sessionToken));
 }
 
+// ---------- 两步验证（v4.0.0，P0：超管强制 TOTP） ----------
+
+const mfaKeyOf = (c: Context<AppEnv>): string | null => c.env.MFA_ENC_KEY?.trim() || null;
+
+/** 登录第二步：密码已验过，只差 TOTP/恢复码 */
+app.get("/mfa", async (c) => {
+  if (c.get("user")) return c.redirect("/", 303);
+  const challenge = await readMfaChallenge(c);
+  if (!challenge) return c.redirect("/login", 303);
+  const csrf = await ensureCsrfToken(c);
+  return c.html(mfaChallengePage({ csrf, next: challenge.next_path }));
+});
+
+app.post("/mfa", async (c) => {
+  const challenge = await readMfaChallenge(c);
+  if (!challenge) return c.redirect("/login", 303);
+  const ip = clientIp(c);
+  if (!(await rateLimit(c.env, `mfa-ip:${ip}`, 10, 900))) {
+    return c.html(mfaChallengePage({ csrf: await ensureCsrfToken(c), error: "尝试太频繁，请 15 分钟后再来" }), 429);
+  }
+  const form = (await c.req.parseBody().catch(() => ({}))) as Form;
+  if (!csrfValid(c, form.csrf)) {
+    return c.html(mfaChallengePage({ csrf: await ensureCsrfToken(c), error: CSRF_EXPIRED }), 403);
+  }
+  const code = formValue(form, "code").trim();
+  const row = await c.env.DB.prepare(
+    `SELECT a.name, a.must_change_pw, a.disabled_at, a.totp_secret, a.totp_enabled_at, a.totp_last_step
+       FROM account a WHERE a.id = ?`,
+  )
+    .bind(challenge.account_id)
+    .first<{
+      name: string;
+      must_change_pw: number;
+      disabled_at: string | null;
+      totp_secret: string | null;
+      totp_enabled_at: string | null;
+      totp_last_step: number | null;
+    }>();
+  if (!row || row.disabled_at || !row.totp_enabled_at || !row.totp_secret) {
+    await clearMfaChallenge(c, challenge.token_hash);
+    return c.redirect("/login", 303);
+  }
+  const key = mfaKeyOf(c);
+  const secret = key ? await openSecret(key, row.totp_secret) : null;
+  if (!key || !secret) {
+    await clearMfaChallenge(c, challenge.token_hash);
+    return c.html(oidcErrorPage("两步验证暂不可用", "服务端未配置 MFA_ENC_KEY，请联系运维。"), 500);
+  }
+
+  const totpStep = await verifyTotp(secret, code, row.totp_last_step ?? 0);
+  let ok = totpStep !== null && (await claimTotpStep(c, challenge.account_id, totpStep));
+  let usedRecovery = false;
+  if (!ok && !/^\d{6}$/.test(code)) {
+    usedRecovery = await consumeRecoveryCode(c, challenge.account_id, code);
+    ok = usedRecovery;
+  }
+  if (!ok) {
+    const dead = await failMfaChallenge(c, challenge);
+    await audit(c, "login.fail", { accountId: challenge.account_id, detail: { reason: "mfa" } });
+    return c.html(
+      mfaChallengePage({
+        csrf: await ensureCsrfToken(c),
+        error: dead ? "尝试次数过多，请重新登录" : "验证码不对，请重试",
+      }),
+      dead ? 429 : 401,
+    );
+  }
+
+  await clearMfaChallenge(c, challenge.token_hash);
+  const token = await createSession(c, challenge.account_id);
+  await audit(c, "login.ok", {
+    accountId: challenge.account_id,
+    detail: usedRecovery ? { mfa: "recovery" } : { mfa: "totp" },
+  });
+  if (usedRecovery) await audit(c, "mfa.recovery_used", { accountId: challenge.account_id });
+  if (row.must_change_pw === 1) {
+    const nx = safeNext(challenge.next_path);
+    return c.redirect(nx === "/" ? "/password" : `/password?next=${encodeURIComponent(nx)}`, 303);
+  }
+  return c.redirect(await resolvePostLoginTarget(c, challenge.next_path, challenge.account_id, token), 303);
+});
+
+/** 启用 TOTP：GET 生成待确认密钥（服务端存密文，不放 cookie），POST 验密码+验证码后落库 */
+app.get("/mfa/setup", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.redirect(`/login?next=${encodeURIComponent("/mfa/setup")}`, 303);
+  if (user.mfaEnabled) return c.redirect(safeNext(c.req.query("next")), 303);
+  const key = mfaKeyOf(c);
+  if (!key) {
+    return c.html(oidcErrorPage("两步验证暂不可用", "服务端未配置 MFA_ENC_KEY，请联系运维。"), 500);
+  }
+  const secret = await (async () => {
+    // 刷新设置页不能换密钥：用户可能已经把上一页的密钥录进验证器，
+    // 一刷新就换会让旧验证码必然对不上（2026-10-23 实际踩到）。
+    const pending = await loadPendingSecret(c, user.id);
+    const existing = pending ? await openSecret(key, pending) : null;
+    if (existing) return existing;
+    const fresh = generateTotpSecret();
+    await savePendingSecret(c, user.id, await sealSecret(key, fresh));
+    return fresh;
+  })();
+  const csrf = await ensureCsrfToken(c);
+  const next = safeNext(c.req.query("next"));
+  return c.html(
+    mfaSetupPage({
+      csrf,
+      secret,
+      otpauth: otpauthUri("WHL Auth", user.name, secret),
+      next: next === "/" ? undefined : next,
+    }),
+  );
+});
+
+app.post("/mfa/setup", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.redirect("/login", 303);
+  if (user.mfaEnabled) return c.redirect("/", 303);
+  // 绑定页是交互式调试场景，5 次/15 分钟太紧（2026-10-23 实际把超管自己卡住）；
+  // 仍保留上限防「已登录会话 + 密码爆破」，但放到 30 次。
+  if (!(await rateLimit(c.env, `mfa-setup:${user.id}`, 30, 900))) {
+    return c.html(mfaSetupPage({ csrf: await ensureCsrfToken(c), secret: "", otpauth: "", error: "尝试太频繁，请 15 分钟后再来" }), 429);
+  }
+  const form = (await c.req.parseBody().catch(() => ({}))) as Form;
+  if (!csrfValid(c, form.csrf)) {
+    return c.html(mfaSetupPage({ csrf: await ensureCsrfToken(c), secret: "", otpauth: "", error: CSRF_EXPIRED }), 403);
+  }
+  const key = mfaKeyOf(c);
+  if (!key) {
+    return c.html(oidcErrorPage("两步验证暂不可用", "服务端未配置 MFA_ENC_KEY，请联系运维。"), 500);
+  }
+  const cred = await c.env.DB.prepare(
+    "SELECT hash FROM credential WHERE account_id = ? AND type = 'password'",
+  )
+    .bind(user.id)
+    .first<{ hash: string }>();
+  if (!cred || !(await verifyPassword(formValue(form, "password"), cred.hash))) {
+    return c.html(mfaSetupPage({ csrf: await ensureCsrfToken(c), secret: "", otpauth: "", error: "当前密码不对" }), 400);
+  }
+  const pending = await loadPendingSecret(c, user.id);
+  const secret = pending ? await openSecret(key, pending) : null;
+  if (!pending || !secret) {
+    return c.redirect("/mfa/setup", 303);
+  }
+  const step = await verifyTotp(secret, formValue(form, "code").trim(), 0);
+  if (step === null) {
+    return c.html(
+      mfaSetupPage({
+        csrf: await ensureCsrfToken(c),
+        secret,
+        otpauth: otpauthUri("WHL Auth", user.name, secret),
+        next: safeNext(form.next) === "/" ? undefined : safeNext(form.next),
+        error: "验证码不对，请确认设备时间准确后重试",
+      }),
+      400,
+    );
+  }
+  await enableTotp(c, user.id, pending, step);
+  const codes = await issueRecoveryCodes(c, user.id);
+  await audit(c, "mfa.enable", { accountId: user.id });
+  const nx = safeNext(form.next);
+  return c.html(mfaRecoveryPage({ codes, next: user.mustChangePassword && nx === "/" ? "/password" : nx }));
+});
+
 app.get("/register", async (c) => {
   if (c.get("user")) return c.redirect("/", 303);
   const csrf = await ensureCsrfToken(c);
   return c.html(registerPage({ csrf, openReg: await openRegAllowed(c) }));
 });
 
-// 语义与 tour POST /api/auth/register 一致：邀请码 / 开放注册（locked 观众号）/ 首个用户 = superadmin
+// 语义与 tour POST /api/auth/register 一致：邀请码 / 开放注册（locked 观众号）。
+// v4.0.0 起注册永不授予 superadmin，首个超管走 scripts/bootstrap-superadmin.mjs。
 app.post("/register", async (c) => {
   const ip = clientIp(c);
   const openReg = await openRegAllowed(c);
@@ -244,35 +449,31 @@ app.post("/register", async (c) => {
   const email = formValue(form, "email").trim() || null;
   if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return renderError("邮箱格式不对", 400);
 
-  const count = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM account").first<{ n: number }>();
-  const isFirst = (count?.n ?? 0) === 0;
   const code = formValue(form, "signupCode").trim();
   // 观众号：无注册码注册（需组织开关放开），锁定绑队直到超管解锁
   let locked = 0;
 
-  if (!isFirst) {
-    if (code) {
-      const codeHash = await sha256Hex(code);
-      const sc = await c.env.DB.prepare(
-        "SELECT expires_at, max_uses, used_count FROM signup_code WHERE code_hash = ?",
-      )
-        .bind(codeHash)
-        .first<{ expires_at: string | null; max_uses: number | null; used_count: number }>();
-      if (!sc) return renderError("注册码无效", 400);
-      if (sc.expires_at && sc.expires_at < new Date().toISOString())
-        return renderError("注册码已过期", 400);
-      if (sc.max_uses !== null && sc.used_count >= sc.max_uses)
-        return renderError("注册码已用完", 400);
-    } else {
-      if (!openReg) return renderError("需要注册码", 400);
-      locked = 1;
-    }
+  if (code) {
+    const codeHash = await sha256Hex(code);
+    const sc = await c.env.DB.prepare(
+      "SELECT expires_at, max_uses, used_count FROM signup_code WHERE code_hash = ?",
+    )
+      .bind(codeHash)
+      .first<{ expires_at: string | null; max_uses: number | null; used_count: number }>();
+    if (!sc) return renderError("注册码无效", 400);
+    if (sc.expires_at && sc.expires_at < new Date().toISOString())
+      return renderError("注册码已过期", 400);
+    if (sc.max_uses !== null && sc.used_count >= sc.max_uses)
+      return renderError("注册码已用完", 400);
+  } else {
+    if (!openReg) return renderError("需要注册码", 400);
+    locked = 1;
   }
 
   const dup = await c.env.DB.prepare("SELECT id FROM account WHERE name = ?").bind(name).first();
   if (dup) return renderError("这个昵称已被占用", 409);
 
-  if (!isFirst && code) {
+  if (code) {
     const codeHash = await sha256Hex(code);
     const upd = await c.env.DB.prepare(
       "UPDATE signup_code SET used_count = used_count + 1 WHERE code_hash = ? AND (max_uses IS NULL OR used_count < max_uses) AND (expires_at IS NULL OR expires_at > ?)",
@@ -283,8 +484,8 @@ app.post("/register", async (c) => {
   }
 
   // 账号收口（P0-11）：account + credential + user_role 一个 D1 batch（隐式事务），
-  // 不出现「有账号无凭证/无授权」的半截账号。role 不再是账号列：新账号按 §6.2 投影播种
-  // user_role——首个账号 = 全局 superadmin，其余 = coach（tour.coach + club.coach，等价旧投影）。
+  // 不出现「有账号无凭证/无授权」的半截账号。新账号一律 coach（tour.coach + club.coach）；
+  // 超管只能由带外 bootstrap 脚本创建，注册接口拿不到全局角色（v4.0.0 删除首个注册者=超管）。
   const now = new Date().toISOString();
   const pwHash = await hashPassword(password);
   const stmts = [
@@ -298,7 +499,7 @@ app.post("/register", async (c) => {
       "INSERT INTO credential (account_id, type, hash, iterations, updated_at) VALUES ((SELECT id FROM account WHERE name = ?), 'password', ?, ?, ?)",
     ).bind(name, pwHash, PBKDF2_ITERATIONS, now),
   ];
-  for (const [appId, key] of isFirst ? [[null, "superadmin"]] : [["tour", "coach"], ["club", "coach"]]) {
+  for (const [appId, key] of [["tour", "coach"], ["club", "coach"]]) {
     stmts.push(
       c.env.DB.prepare(
         "INSERT INTO user_role (account_id, role_id, granted_at) SELECT (SELECT id FROM account WHERE name = ?), id, ? FROM role WHERE app_id IS ? AND key = ?",
@@ -311,7 +512,7 @@ app.post("/register", async (c) => {
   } catch {
     // 建号失败（并发同名撞 UNIQUE）就把上面预扣的名额还回去：核销在 batch 之外、batch 是
     // 整体事务，失败即「没有账号」，退还不至于被白耗一个名额（F-F）
-    if (!isFirst && code) await refundSignupCode(c, code);
+    if (code) await refundSignupCode(c, code);
     return renderError("这个昵称已被占用", 409);
   }
   userId = (await c.env.DB.prepare("SELECT id FROM account WHERE name = ?").bind(name).first<{ id: number }>())!.id;

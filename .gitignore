@@ -9,3 +9,4 @@ dist/
 wrangler.test.jsonc
 *.log
 .DS_Store
+backup-*.sql
