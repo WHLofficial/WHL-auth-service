@@ -1,6 +1,6 @@
 # v4.0.3 · 全站字体（auth）
 
-- **状态**：本地实现完成，未提交、未发布。
+- **状态**：已上线（2026-10-23）。push `7a9dbd2..affeed4`；手动 `wrangler deploy`，Version `86130b7f-cea5-4566-a6e9-d7311551a1a9`。
 - **判级**：patch（纯展示微调，无新增能力；`VERSIONS.md` 口径）。
 - **版本**：`4.0.2` → `4.0.3`（`package.json` 是唯一真源，`src/version.ts` 直接读它）。
 
@@ -51,4 +51,5 @@
 
 ## 待办
 
-- 提交与发布（等指令）；发布后回写 Version 与本文件状态。
+- 已发布（2026-10-23）。生产实测：`/login` 只拉 `inter-latin.woff2` 48,444 B；body/h1/input/button computed 首族 Inter；1440/375 无横滚；页脚 v4.0.3。
+- 若登录页 h1 将来涨到 ≥22px，再回来评估衬线标题（见 F1）。

@@ -25,7 +25,7 @@
 | —（安全审计 P0） | `v4.0.0` | 管理端双因子 + TOTP MFA + 超管初始化 | major：`/api/admin/*` 契约不兼容（`BIND_SECRET` → `ADMIN_SECRET` + `X-Nonce` + `X-Actor-Token`，`actor_id` 不再走 body）+ 注册不再产生超管、空库必须带外 bootstrap（写入口/初始化流程变更，需 tour 同轮改造） |
 | —（MFA 绑定修复） | `v4.0.1` | `/mfa/setup` 刷新不再更换待确认密钥 | patch：设置页 GET 复用 10 分钟内仍有效的 pending secret，避免用户录入上一页密钥后刷新导致验证码必然失效；新增 e2e 回归断言 |
 | —（MFA 限流放宽） | `v4.0.2` | MFA 绑定限流 5 → 30 次/15 分钟 | patch：绑定页是交互式调试场景，5 次上限把超管自己卡住；保留上限防「已登录会话 + 密码爆破」，当前生产 `mfa-setup:1` 计数已清零 |
-| —（全站字体） | `v4.0.3` | 正文 Inter + 验证码等宽（自托管，Workers Assets） | patch：纯展示微调；新增 `assets` 目录只承载 `/fonts/*`，路由与 CSP 仍由 Worker 出 |
+| —（全站字体） | `v4.0.3` | 正文 Inter + 验证码等宽（自托管，Workers Assets） | patch：纯展示微调；新增 `assets` 目录只承载 `/fonts/*`，路由与 CSP 仍由 Worker 出。2026-10-23 上线：push `7a9dbd2..affeed4`，手动 `wrangler deploy` 出包 Version `86130b7f-cea5-4566-a6e9-d7311551a1a9`；生产 `/login` 只请求 `inter-latin.woff2`（48,444 B），body/h1/input/button 均为 Inter，1440/375 无横滚 |
 
 **当前版本：`v4.0.3`**
 
