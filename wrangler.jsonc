@@ -36,5 +36,11 @@
   // 生产自定义域（TECH_DESIGN §9.4）：DNS 记录与证书由 Cloudflare 自动签发
   "routes": [
     { "pattern": "auth.whleague.win", "custom_domain": true }
-  ]
+  ],
+  // 自托管字体（v4.0.3）：目录里只有 /fonts/*，没有 index.html；未命中的路径照旧进 Worker，
+  // 路由与 CSP 都由 src/index.ts 出，不经过边缘直出。CSP 走 default-src 'self'，同源字体天然放行。
+  "assets": {
+    "directory": "./public",
+    "not_found_handling": "none"
+  }
 }

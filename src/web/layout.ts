@@ -11,13 +11,29 @@ export function esc(value: string): string {
 }
 
 const STYLE = `
-:root { color-scheme: light; }
+/* ---- 字体（v4.0.3）：正文 Inter，验证码等宽；中文落系统黑体，不下载 CJK 字体 ---- */
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 100 900; font-display: swap;
+  src: url('/fonts/inter-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 100 900; font-display: swap;
+  src: url('/fonts/inter-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 100 800; font-display: swap;
+  src: url('/fonts/jbmono-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 100 800; font-display: swap;
+  src: url('/fonts/jbmono-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+
+:root { color-scheme: light;
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 * { box-sizing: border-box; }
 /* 作者样式里的 display（如 a.jump）会压过 UA 的 [hidden]，补回来让 hidden 属性真生效 */
 [hidden] { display: none !important; }
 body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
   background: #f4f5f7; color: #1c1e21;
-  font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  font-family: var(--font-sans); }
 .card { width: 100%; max-width: 360px; margin: 16px; padding: 28px;
   background: #fff; border: 1px solid #e3e5e8; border-radius: 12px; }
 h1 { font-size: 18px; margin: 0 0 4px; }
@@ -25,6 +41,8 @@ h1 { font-size: 18px; margin: 0 0 4px; }
 label { display: block; font-size: 13px; margin: 14px 0 6px; }
 input { width: 100%; padding: 10px 12px; font-size: 15px;
   border: 1px solid #cdd2d9; border-radius: 8px; background: #fff; }
+/* 表单控件默认不继承正文字体（Chrome 落到 Arial），显式继承 */
+input, button { font-family: inherit; }
 input:focus { outline: 2px solid #2563eb; outline-offset: -1px; border-color: #2563eb; }
 button { width: 100%; margin-top: 20px; padding: 10px 12px; font-size: 15px;
   border: 0; border-radius: 8px; background: #2563eb; color: #fff; cursor: pointer; }
@@ -49,7 +67,7 @@ dl { margin: 8px 0 0; }
 .center { text-align: center; margin: 12px 0 0; }
 .kbd { display: inline-block; padding: 10px 16px; font-size: 20px; letter-spacing: 2px;
   background: #eef0f3; border: 1px solid #cdd2d9; border-radius: 8px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  font-family: var(--font-mono); }
 a.btn2 { display: block; margin-top: 20px; padding: 10px 12px; font-size: 15px;
   border-radius: 8px; background: #eef0f3; color: #1c1e21; text-align: center; text-decoration: none; }
 a.btn2:hover { background: #e2e5ea; }
@@ -82,6 +100,7 @@ export function page(title: string, body: string, heading = "WHL 统一登录"):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)} · WHL 统一登录</title>
+<link rel="preload" href="/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
 <style>${STYLE}</style>
 </head>
 <body>
