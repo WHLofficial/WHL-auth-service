@@ -11,8 +11,11 @@ import { parseUris } from "./util";
  * 最后一跳是跨 origin 的，只写 'self' 时会被静默拦下——页面停在登录页、
  * 输入值还在、无任何可见报错，用户表现就是「登不上去」（而 auth 侧会话其实已建立）。
  * 白名单按 app 表里已注册的回调地址派生，本地与生产两套 client 自动覆盖，新增 client 无需改代码。
+ *
+ * font-src 只放行平台共享字体源（v4.0.4）：@font-face 已切到 fonts.whleague.win（跨源），
+ * default-src 'self' 不放行跨源字体，故显式列出；仅此一个源，不放宽 data: 或任何其他外部源。
  */
-const BASE_CSP = "default-src 'self'; style-src 'unsafe-inline'; form-action 'self'";
+const BASE_CSP = "default-src 'self'; style-src 'unsafe-inline'; form-action 'self'; font-src https://fonts.whleague.win";
 const TAIL_CSP = "; base-uri 'none'; frame-ancestors 'none'";
 
 const TTL_MS = 60_000;

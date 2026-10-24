@@ -11,18 +11,19 @@ export function esc(value: string): string {
 }
 
 const STYLE = `
-/* ---- 字体（v4.0.3）：正文 Inter，验证码等宽；中文落系统黑体，不下载 CJK 字体 ---- */
+/* 字体版本：v1（升级时全局替换 fonts.whleague.win/v1/） */
+/* ---- 字体：正文 Inter，验证码等宽；中文落系统黑体，不下载 CJK 字体（v4.0.4 起切平台共享源） ---- */
 @font-face { font-family: 'Inter'; font-style: normal; font-weight: 100 900; font-display: swap;
-  src: url('/fonts/inter-latin.woff2') format('woff2');
+  src: url('https://fonts.whleague.win/v1/inter-latin.woff2') format('woff2');
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
 @font-face { font-family: 'Inter'; font-style: normal; font-weight: 100 900; font-display: swap;
-  src: url('/fonts/inter-latin-ext.woff2') format('woff2');
+  src: url('https://fonts.whleague.win/v1/inter-latin-ext.woff2') format('woff2');
   unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
 @font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 100 800; font-display: swap;
-  src: url('/fonts/jbmono-latin.woff2') format('woff2');
+  src: url('https://fonts.whleague.win/v1/jbmono-latin.woff2') format('woff2');
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
 @font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 100 800; font-display: swap;
-  src: url('/fonts/jbmono-latin-ext.woff2') format('woff2');
+  src: url('https://fonts.whleague.win/v1/jbmono-latin-ext.woff2') format('woff2');
   unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
 
 :root { color-scheme: light;
@@ -100,7 +101,7 @@ export function page(title: string, body: string, heading = "WHL 统一登录"):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)} · WHL 统一登录</title>
-<link rel="preload" href="/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="https://fonts.whleague.win/v1/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
 <style>${STYLE}</style>
 </head>
 <body>
