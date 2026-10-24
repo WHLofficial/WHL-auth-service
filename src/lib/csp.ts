@@ -14,8 +14,13 @@ import { parseUris } from "./util";
  *
  * font-src 只放行平台共享字体源（v4.0.4）：@font-face 已切到 fonts.whleague.win（跨源），
  * default-src 'self' 不放行跨源字体，故显式列出；仅此一个源，不放宽 data: 或任何其他外部源。
+ *
+ * 指令顺序硬约束：BASE_CSP 必须以 form-action 'self' 结尾——clientOrigins() 派生的
+ * client 回调 origin 是无分隔后拼在 BASE_CSP 之后的，font-src 若放在末尾会把整批
+ * 回调 origin 灌进 font-src（v4.0.4 切换时引入，fonts.test.mjs 的外部源红线抓到），
+ * 同时 form-action 丢白名单会让生产登录「跳不回 client」。
  */
-const BASE_CSP = "default-src 'self'; style-src 'unsafe-inline'; form-action 'self'; font-src https://fonts.whleague.win";
+const BASE_CSP = "default-src 'self'; style-src 'unsafe-inline'; font-src https://fonts.whleague.win; form-action 'self'";
 const TAIL_CSP = "; base-uri 'none'; frame-ancestors 'none'";
 
 const TTL_MS = 60_000;
